@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React from 'react';
 import {
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -27,7 +26,7 @@ export default function LucaScreen() {
       <StatusBar barStyle="light-content" />
       
       <View style={styles.header}>
-        <SafeAreaView>
+        <View>
           <View style={styles.headerTop}>
             <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
               <Ionicons name="chevron-back" size={28} color="#fff" />
@@ -35,7 +34,7 @@ export default function LucaScreen() {
             <Text style={styles.headerTitle}>Insights</Text>
             <View style={{ width: 40 }} />
           </View>
-        </SafeAreaView>
+        </View>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>

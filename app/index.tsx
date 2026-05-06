@@ -1,19 +1,21 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { Stack, useRouter } from 'expo-router';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 import React, { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
+  Dimensions,
   KeyboardAvoidingView,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
 import Animated, {
   interpolateColor,
@@ -24,6 +26,11 @@ import Animated, {
   withSpring,
   withTiming
 } from 'react-native-reanimated';
+import { useToast } from '../context/ToastContext';
+import { auth } from '../scripts/firebaseConfig';
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const STATUS_BAR_HEIGHT = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 44;
 
 const PRIMARY_GREEN = '#00C853';
 const TEXT_GRAY = '#757575';
@@ -79,6 +86,7 @@ const AnimatedInput = ({
 
   return (
     <View style={styles.inputGroup}>
+      <Stack.Screen options={{ headerShown: false }} />
       <Text style={[
         styles.label,
         { color: isFocused ? PRIMARY_GREEN : TEXT_GRAY }
@@ -117,9 +125,11 @@ const AnimatedInput = ({
 };
 
 export default function LoginScreen() {
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const { showToast } = useToast();
 
   const logoScale = useSharedValue(1);
 
@@ -138,15 +148,33 @@ export default function LoginScreen() {
     transform: [{ scale: logoScale.value }],
   }));
 
-  const handleLogin = () => {
-    console.log('Login com:', username, password);
-    router.push('/onboarding');
+  const handleLogin = async () => {
+    if (!email || !password) {
+      showToast('Preencha todos os campos', 'info');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      showToast('Bem-vindo de volta!', 'success');
+      // Redirecionamento é feito automaticamente pelo RootLayout
+    } catch (error: any) {
+      console.error('Erro de login:', error);
+      let errorMessage = 'E-mail ou senha incorretos.';
+      if (error.code === 'auth/invalid-email') {
+        errorMessage = 'E-mail inválido.';
+      }
+      showToast(errorMessage, 'error');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const isFormValid = username.length > 0 && password.length >= 6;
+  const isFormValid = email.length > 0 && password.length >= 6;
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
       <StatusBar barStyle="dark-content" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -167,11 +195,12 @@ export default function LoginScreen() {
           <View style={styles.formContainer}>
 
             <AnimatedInput
-              label="Usuário"
-              icon="person-outline"
-              value={username}
-              onChangeText={setUsername}
-              placeholder="Seu usuário"
+              label="E-mail"
+              icon="mail-outline"
+              value={email}
+              onChangeText={setEmail}
+              placeholder="seu@email.com"
+              autoCapitalize="none"
             />
 
             <AnimatedInput
@@ -185,14 +214,21 @@ export default function LoginScreen() {
 
             <Pressable
               onPress={handleLogin}
+              disabled={loading}
               style={({ pressed, hovered }) => [
                 styles.button,
-                (pressed || hovered || isFormValid) ? styles.buttonActive : styles.buttonInactive,
-                { transform: [{ scale: pressed ? 0.96 : 1 }] }
+                (pressed || hovered || (isFormValid && !loading)) ? styles.buttonActive : styles.buttonInactive,
+                { transform: [{ scale: (pressed && !loading) ? 0.96 : 1 }] }
               ]}
             >
-              <Text style={styles.buttonText}>Entrar</Text>
+              {loading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>Entrar</Text>
+              )}
             </Pressable>
+
+
 
             <View style={styles.footer}>
               <Text style={styles.footerText}>não tem uma conta? </Text>
@@ -203,7 +239,7 @@ export default function LoginScreen() {
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -212,22 +248,23 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
   },
+
   scrollContent: {
     flexGrow: 1,
-    paddingHorizontal: 30,
-    paddingTop: 40,
+    paddingHorizontal: 28,
+    paddingTop: STATUS_BAR_HEIGHT + 20,
     paddingBottom: 40,
     alignItems: 'center',
     justifyContent: 'center',
   },
   logoContainer: {
-    marginBottom: 60,
+    marginBottom: 40,
     width: '100%',
     alignItems: 'center',
   },
   logo: {
-    width: 340,
-    height: 240,
+    width: Math.min(SCREEN_WIDTH * 0.8, 320),
+    height: Math.min(SCREEN_WIDTH * 0.55, 200),
   },
   formContainer: {
     width: '100%',
@@ -254,7 +291,7 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
   },
   inputIcon: {
-    marginRight: 12,
+    marginRight: 16,
   },
   input: {
     flex: 1,
@@ -262,6 +299,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#333',
     fontWeight: '500',
+    paddingLeft: 4,
   },
   eyeIcon: {
     padding: 4,
@@ -293,7 +331,7 @@ const styles = StyleSheet.create({
   footer: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: 30,
+    marginTop: 20,
   },
   footerText: {
     color: TEXT_GRAY,
@@ -304,4 +342,5 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '800',
   },
-});
+},
+);

@@ -3,7 +3,6 @@ import { useRouter } from 'expo-router';
 import { signOut } from 'firebase/auth';
 import React from 'react';
 import {
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -53,11 +52,11 @@ export default function ProfileScreen() {
       <StatusBar barStyle="light-content" />
       
       <View style={styles.header}>
-        <SafeAreaView>
+        <View>
           <View style={styles.headerTop}>
             <Text style={styles.headerTitle}>Perfil</Text>
           </View>
-        </SafeAreaView>
+        </View>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>

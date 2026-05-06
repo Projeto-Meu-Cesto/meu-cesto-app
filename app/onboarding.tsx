@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -67,7 +66,7 @@ export default function OnboardingScreen() {
         </Animated.View>
       </View>
 
-      <SafeAreaView style={styles.content}>
+      <View style={styles.content}>
         <ScrollView 
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
@@ -133,7 +132,7 @@ export default function OnboardingScreen() {
             </Pressable>
           </Animated.View>
         </ScrollView>
-      </SafeAreaView>
+      </View>
     </View>
   );
 }

@@ -5,7 +5,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -13,6 +12,8 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  Alert,
+  ActivityIndicator,
 } from 'react-native';
 import Animated, {
   interpolateColor,
@@ -21,6 +22,9 @@ import Animated, {
   withSpring,
   withTiming
 } from 'react-native-reanimated';
+import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
+import { auth } from '../scripts/firebaseConfig';
+import { useToast } from '../context/ToastContext';
 
 const PRIMARY_GREEN = '#00C853';
 const TEXT_GRAY = '#757575';
@@ -115,24 +119,51 @@ const AnimatedInput = ({
 
 export default function RegisterScreen() {
   const [name, setName] = useState('');
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const { showToast } = useToast();
 
-  const handleRegister = () => {
-    if (password !== confirmPassword) {
-      alert('As senhas não coincidem!');
+  const handleRegister = async () => {
+    if (!name || !email || !password || !confirmPassword) {
+      showToast('Preencha todos os campos', 'info');
       return;
     }
-    console.log('Registro com:', { name, username, password });
-    router.push('/onboarding');
+
+    if (password !== confirmPassword) {
+      showToast('As senhas não coincidem', 'error');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      await updateProfile(userCredential.user, {
+        displayName: name,
+      });
+      showToast('Conta criada com sucesso!', 'success');
+    } catch (error: any) {
+      console.error('Erro de registro:', error);
+      let errorMessage = 'Não foi possível criar sua conta.';
+      if (error.code === 'auth/email-already-in-use') {
+        errorMessage = 'Este e-mail já está em uso.';
+      } else if (error.code === 'auth/invalid-email') {
+        errorMessage = 'E-mail inválido.';
+      } else if (error.code === 'auth/weak-password') {
+        errorMessage = 'A senha é muito fraca.';
+      }
+      showToast(errorMessage, 'error');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const isFormValid = name.length > 0 && username.length > 0 && password.length >= 6 && password === confirmPassword;
+  const isFormValid = name.length > 0 && email.length > 0 && password.length >= 6 && password === confirmPassword;
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
       <StatusBar barStyle="dark-content" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -164,12 +195,13 @@ export default function RegisterScreen() {
               autoCapitalize="words"
             />
 
-            <AnimatedInput
-              label="Usuário"
-              icon="at-outline"
-              value={username}
-              onChangeText={setUsername}
-              placeholder="Escolha um usuário"
+             <AnimatedInput
+              label="E-mail"
+              icon="mail-outline"
+              value={email}
+              onChangeText={setEmail}
+              placeholder="seu@email.com"
+              autoCapitalize="none"
             />
 
             <AnimatedInput
@@ -193,13 +225,18 @@ export default function RegisterScreen() {
             {/* Botão Cadastrar */}
             <Pressable
               onPress={handleRegister}
+              disabled={loading}
               style={({ pressed, hovered }) => [
                 styles.button,
-                (pressed || hovered || isFormValid) ? styles.buttonActive : styles.buttonInactive,
-                { transform: [{ scale: pressed ? 0.96 : 1 }] }
+                (pressed || hovered || (isFormValid && !loading)) ? styles.buttonActive : styles.buttonInactive,
+                { transform: [{ scale: (pressed && !loading) ? 0.96 : 1 }] }
               ]}
             >
-              <Text style={styles.buttonText}>Criar Conta</Text>
+              {loading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>Criar Conta</Text>
+              )}
             </Pressable>
 
             {/* Link de Login */}
@@ -212,7 +249,7 @@ export default function RegisterScreen() {
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 

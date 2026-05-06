@@ -1,18 +1,24 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import { collection, doc, onSnapshot, orderBy, query, updateDoc } from 'firebase/firestore';
+import React, { useEffect, useState } from 'react';
 import {
-  SafeAreaView,
+  Dimensions,
+  Platform,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  Dimensions,
-  Platform,
 } from 'react-native';
-import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
+import { auth, db } from '../../scripts/firebaseConfig';
+
+const { width } = Dimensions.get('window');
+const STATUS_BAR_HEIGHT = Platform.OS === 'android'
+  ? (StatusBar.currentHeight ?? 24)
+  : 44;
 
 const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
@@ -29,12 +35,17 @@ const INITIAL_ITEMS = [
 ];
 
 export default function ListsScreen() {
-  const [items, setItems] = useState(INITIAL_ITEMS);
-  const router = useRouter();
-
-  const toggleItem = (id: string) => {
-  const user = auth.currentUser;
   const [items, setItems] = useState<any[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const router = useRouter();
+  const user = auth.currentUser;
+
+  const onRefresh = React.useCallback(() => {
+    setRefreshing(true);
+    setTimeout(() => {
+      setRefreshing(false);
+    }, 1500);
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -57,23 +68,39 @@ export default function ListsScreen() {
 
   const toggleItem = async (itemId: string, currentStatus: boolean) => {
     if (!user) return;
-    const itemRef = doc(db, 'users', user.uid, 'shopping_list', itemId);
-    await updateDoc(itemRef, { checked: !currentStatus });
+    try {
+      const itemRef = doc(db, 'users', user.uid, 'shopping_list', itemId);
+      await updateDoc(itemRef, { checked: !currentStatus });
+    } catch (error) {
+      console.error("Erro ao atualizar item:", error);
+    }
   };
 
   const alreadyInCart = items.filter(item => item.checked);
   const stillMissing = items.filter(item => !item.checked);
 
-  const totalEstimated = items.reduce((acc, item) => acc + (parseFloat(item.price) || 0), 0);
-  const totalInCart = alreadyInCart.reduce((acc, item) => acc + (parseFloat(item.price) || 0), 0);
+  const totalEstimated = items.reduce((acc, item) => {
+    const price = typeof item.price === 'string'
+      ? parseFloat(item.price.replace('R$ ', '').replace(',', '.'))
+      : (parseFloat(item.price) || 0);
+    return acc + price;
+  }, 0);
+
+  const totalInCart = alreadyInCart.reduce((acc, item) => {
+    const price = typeof item.price === 'string'
+      ? parseFloat(item.price.replace('R$ ', '').replace(',', '.'))
+      : (parseFloat(item.price) || 0);
+    return acc + price;
+  }, 0);
+
   const progress = items.length > 0 ? alreadyInCart.length / items.length : 0;
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
-      
+      <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
+
       <View style={styles.header}>
-        <SafeAreaView>
+        <View>
           <View style={styles.headerTop}>
             <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
               <Ionicons name="chevron-back" size={28} color="#fff" />
@@ -86,34 +113,45 @@ export default function ListsScreen() {
 
           <View style={styles.progressCard}>
             <View style={styles.progressHeader}>
-                <View>
-                    <Text style={styles.progressLabel}>No carrinho</Text>
-                    <Text style={styles.progressAmount}>R$ {totalInCart.toFixed(2).replace('.', ',')}</Text>
-                </View>
-                <View style={{ alignItems: 'flex-end' }}>
-                    <Text style={styles.progressLabel}>Total estimado</Text>
-                    <Text style={styles.progressAmount}>R$ {totalEstimated.toFixed(2).replace('.', ',')}</Text>
-                </View>
+              <View>
+                <Text style={styles.progressLabel}>No carrinho</Text>
+                <Text style={styles.progressAmount}>R$ {totalInCart.toFixed(2).replace('.', ',')}</Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={styles.progressLabel}>Total estimado</Text>
+                <Text style={styles.progressAmount}>R$ {totalEstimated.toFixed(2).replace('.', ',')}</Text>
+              </View>
             </View>
             <View style={styles.progressBarBg}>
-                <View style={[styles.progressBarFill, { width: `${progress * 100}%` }]} />
+              <View style={[styles.progressBarFill, { width: `${progress * 100}%` }]} />
             </View>
           </View>
-        </SafeAreaView>
+        </View>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={PRIMARY_GREEN}
+            colors={[PRIMARY_GREEN]}
+          />
+        }
+      >
+
         {stillMissing.length > 0 && (
           <>
-            <Text style={styles.sectionTitle}>AINDA FALTA PEGAR</Text>
+            <Text style={styles.sectionTitle}>MINHA LISTA DE COMPRAS</Text>
             <View style={styles.listSection}>
               {stillMissing.map((item) => (
-                <ShoppingItem 
-                  key={item.id} 
-                  name={item.name} 
-                  price={item.price} 
-                  checked={false} 
+                <ShoppingItem
+                  key={item.id}
+                  name={item.name}
+                  price={item.price}
+                  checked={false}
                   onPress={() => toggleItem(item.id, false)}
                 />
               ))}
@@ -126,11 +164,11 @@ export default function ListsScreen() {
             <Text style={[styles.sectionTitle, { marginTop: 20 }]}>JÁ NO CARRINHO</Text>
             <View style={styles.listSection}>
               {alreadyInCart.map((item) => (
-                <ShoppingItem 
-                  key={item.id} 
-                  name={item.name} 
-                  price={item.price} 
-                  checked={true} 
+                <ShoppingItem
+                  key={item.id}
+                  name={item.name}
+                  price={item.price}
+                  checked={true}
                   onPress={() => toggleItem(item.id, true)}
                 />
               ))}
@@ -160,9 +198,9 @@ function ShoppingItem({ name, price, checked, onPress }: any) {
         <View style={[styles.checkbox, checked && styles.checkboxChecked]}>
           {checked && <Ionicons name="checkmark" size={14} color="#fff" />}
         </View>
-        <Text style={[styles.itemName, checked && styles.itemCheckedText]}>{name}</Text>
+        <Text style={[styles.itemName, checked && styles.itemNameChecked]}>{name}</Text>
       </View>
-      <Text style={[styles.itemPrice, checked && styles.itemCheckedText]}>R$ {price}</Text>
+      <Text style={[styles.itemPrice, checked && styles.itemPriceChecked]}>R$ {price}</Text>
     </TouchableOpacity>
   );
 }
@@ -174,7 +212,8 @@ const styles = StyleSheet.create({
   },
   header: {
     backgroundColor: PRIMARY_GREEN,
-    paddingHorizontal: 25,
+    paddingHorizontal: 20,
+    paddingTop: STATUS_BAR_HEIGHT,
     paddingBottom: 25,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
@@ -183,23 +222,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: Platform.OS === 'android' ? 10 : 0,
     marginBottom: 25,
   },
   headerTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '900',
     color: '#fff',
   },
   backButton: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     justifyContent: 'center',
+    alignItems: 'flex-start',
   },
   notificationCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
@@ -340,6 +379,36 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   addButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 60,
+    paddingHorizontal: 20,
+  },
+  emptyText: {
+    fontSize: 16,
+    color: '#94A3B8',
+    fontWeight: '600',
+    marginTop: 15,
+    marginBottom: 25,
+    textAlign: 'center',
+  },
+  emptyButton: {
+    backgroundColor: PRIMARY_GREEN,
+    paddingVertical: 14,
+    paddingHorizontal: 30,
+    borderRadius: 16,
+    shadowColor: PRIMARY_GREEN,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  emptyButtonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '800',

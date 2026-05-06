@@ -1,23 +1,26 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
-  SafeAreaView,
+  Dimensions,
+  Platform,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  Dimensions,
-  Platform,
 } from 'react-native';
-import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
+import Animated, { FadeInUp } from 'react-native-reanimated';
 import { auth, db } from '../../scripts/firebaseConfig';
-import { doc, onSnapshot } from 'firebase/firestore';
 
 const { width } = Dimensions.get('window');
-const PRIMARY_GREEN = '#00A36C'; 
+const STATUS_BAR_HEIGHT = Platform.OS === 'android'
+  ? (StatusBar.currentHeight ?? 24)
+  : 44;
+const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
@@ -32,38 +35,88 @@ export default function HomeScreen() {
       { id: '1', label: 'Alimentação', value: 'R$ 0', icon: 'cart' },
       { id: '2', label: 'Transporte', value: 'R$ 0', icon: 'bus' },
       { id: '3', label: 'Outros', value: 'R$ 0', icon: 'cube' },
-    ],
-    weeklyList: [
-      { id: '1', name: 'Carregando lista...', price: '', color: '#E2E8F0' },
     ]
   });
+
+  const [weeklyList, setWeeklyList] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = React.useCallback(() => {
+    setRefreshing(true);
+    // Como o Firebase já é real-time via onSnapshot, o refresh manual apenas
+    // simula o feedback visual de atualização que o usuário espera.
+    setTimeout(() => {
+      setRefreshing(false);
+    }, 1500);
+  }, []);
+
+  const addProduct = (productName: string) => {
+    if (productName.trim() === '') return;
+
+    const newProduct = {
+      id: Math.random().toString(),
+      name: productName,
+    };
+
+    setWeeklyList([...weeklyList, newProduct]);
+  };
 
   useEffect(() => {
     if (!user) return;
 
-    // Listener para dados do dashboard no Firestore
-    const unsub = onSnapshot(doc(db, 'dashboards', user.uid), (doc) => {
-      if (doc.exists()) {
-        const data = doc.data();
-        setStats({
+
+    const unsubStats = onSnapshot(doc(db, 'dashboards', user.uid), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        setStats(prev => ({
+          ...prev,
           totalSpent: data.totalSpent || '0,00',
           percentChange: data.percentChange || '+0%',
-          categories: data.categories || stats.categories,
-          weeklyList: data.weeklyList || stats.weeklyList,
-        });
+          categories: data.categories || prev.categories,
+        }));
       }
     });
 
-    return () => unsub();
+    const q = query(
+      collection(db, 'users', user.uid, 'shopping_list'),
+      orderBy('createdAt', 'desc'),
+      limit(4)
+    );
+
+    const unsubList = onSnapshot(q, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach((doc) => {
+        items.push({ id: doc.id, ...doc.data() });
+      });
+      setWeeklyList(items);
+      setLoading(false);
+    });
+
+    return () => {
+      unsubStats();
+      unsubList();
+    };
   }, [user]);
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
-      
-      {/* Green Header Section */}
-      <View style={styles.header}>
-        <SafeAreaView>
+      <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
+
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={PRIMARY_GREEN} // Cor do spinner (mais visível se descer para a área branca ou com fundo)
+            colors={[PRIMARY_GREEN]}
+            progressViewOffset={STATUS_BAR_HEIGHT + 60} // Desce mais o loader
+          />
+        }
+      >
+        <View style={styles.header}>
           <View style={styles.headerTop}>
             <View>
               <Text style={styles.greeting}>Bom dia,</Text>
@@ -80,35 +133,44 @@ export default function HomeScreen() {
             <Text style={styles.mainCardAmount}>R$ {stats.totalSpent}</Text>
             <Text style={styles.mainCardSubtitle}>{stats.percentChange} em relação ao mês passado</Text>
           </Animated.View>
-        </SafeAreaView>
-      </View>
-
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        
-        {/* Categories Row */}
-        <View style={styles.categoriesRow}>
-          {stats.categories.map((cat: any) => (
-            <CategoryCard key={cat.id} icon={cat.icon} label={cat.label} value={cat.value} />
-          ))}
         </View>
 
-        {/* Weekly List Section */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>LISTA DA SEMANA</Text>
-          <TouchableOpacity onPress={() => router.push('/lists')}>
-            <Text style={styles.seeAll}>Ver tudo →</Text>
-          </TouchableOpacity>
-        </View>
+        <View style={styles.mainContent}>
 
-        <View style={styles.listContainer}>
-          {stats.weeklyList.map((item: any) => (
-            <ListItem key={item.id} name={item.name} price={item.price} color={item.color} />
-          ))}
+
+          {/* Categories Row */}
+          <View style={styles.categoriesRow}>
+            {stats.categories.map((cat: any) => (
+              <CategoryCard key={cat.id} icon={cat.icon} label={cat.label} value={cat.value} />
+            ))}
+          </View>
+
+          {/* Weekly List Section */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>LISTA DA SEMANA</Text>
+            <TouchableOpacity onPress={() => router.push('/lists')}>
+              <Text style={styles.seeAll}>Ver tudo →</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.listContainer}>
+            {weeklyList.length > 0 ? (
+              weeklyList.map((item: any) => (
+                <ListItem key={item.id} name={item.name} price={item.price} color={item.color || '#CBD5E1'} />
+              ))
+            ) : (
+              <View style={styles.emptyBox}>
+                <Ionicons name="cart-outline" size={32} color="#CBD5E1" />
+                <Text style={styles.emptyText}>Nenhum item adicionado à lista.</Text>
+              </View>
+            )}
+          </View>
+
         </View>
 
       </ScrollView>
 
-      <TouchableOpacity 
+      <TouchableOpacity
         style={styles.fab}
         onPress={() => router.push('/addItem')}
       >
@@ -147,10 +209,15 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: BG_LIGHT,
   },
+  scrollContent: {
+    paddingBottom: 120,
+    backgroundColor: BG_LIGHT,
+  },
   header: {
     backgroundColor: PRIMARY_GREEN,
-    paddingHorizontal: 25,
-    paddingBottom: 30,
+    paddingHorizontal: 20,
+    paddingTop: STATUS_BAR_HEIGHT + 10,
+    paddingBottom: 35,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
   },
@@ -158,7 +225,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: Platform.OS === 'android' ? 10 : 0,
     marginBottom: 25,
   },
   greeting: {
@@ -214,10 +280,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '500',
   },
-  scrollContent: {
+  mainContent: {
     paddingHorizontal: 25,
     paddingTop: 25,
-    paddingBottom: 120,
   },
   categoriesRow: {
     flexDirection: 'row',
@@ -322,5 +387,31 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 15,
     elevation: 8,
+  },
+  loadingBox: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: TEXT_GRAY,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  emptyBox: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#F1F5F9',
+    borderStyle: 'dashed',
+  },
+  emptyText: {
+    color: '#94A3B8',
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 10,
+    textAlign: 'center',
   },
 });

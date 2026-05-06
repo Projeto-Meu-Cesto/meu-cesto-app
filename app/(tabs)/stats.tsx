@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React from 'react';
 import {
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -27,7 +26,7 @@ export default function StatsScreen() {
       <StatusBar barStyle="light-content" />
       
       <View style={styles.header}>
-        <SafeAreaView>
+        <View>
           <View style={styles.headerTop}>
             <TouchableOpacity onPress={() => router.back()}>
                 <Ionicons name="chevron-back" size={28} color="#fff" />
@@ -44,7 +43,7 @@ export default function StatsScreen() {
             <Text style={styles.totalValue}>R$ 890,00</Text>
             <Text style={styles.totalSubtitle}>+12% vs mês anterior</Text>
           </View>
-        </SafeAreaView>
+        </View>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>

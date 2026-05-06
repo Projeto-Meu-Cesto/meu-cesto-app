@@ -1,8 +1,13 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  SafeAreaView,
+  ActivityIndicator,
+  Alert,
+  Dimensions,
+  KeyboardAvoidingView,
+  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -10,12 +15,14 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  Dimensions,
-  Platform,
-  Alert,
 } from 'react-native';
+import { CosmosProduct, fetchProductsByName } from '../scripts/cosmosService';
 import { auth, db } from '../scripts/firebaseConfig';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+
+const { width, height } = Dimensions.get('window');
+const STATUS_BAR_HEIGHT = Platform.OS === 'android'
+  ? (StatusBar.currentHeight ?? 24)
+  : 44; // iOS safe area top (cobre notch e Dynamic Island)
 
 const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
@@ -23,10 +30,51 @@ const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
 
 export default function AddItemScreen() {
-  const [search, setSearch] = useState('');
-  const [selectedItem, setSelectedItem] = useState<any>(null);
+  const [name, setName] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<CosmosProduct[]>([]);
+  const [selectedItems, setSelectedItems] = useState<CosmosProduct[]>([]);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
   const user = auth.currentUser;
+
+  // Busca automática com debounce de 600ms
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    if (!name || name.trim().length < 3) {
+      setResults([]);
+      return;
+    }
+
+    debounceRef.current = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const data = await fetchProductsByName(name.trim());
+        console.log('[Cosmos] Resultados para "' + name + '":', JSON.stringify(data?.slice(0, 3)));
+        setResults(data || []);
+      } catch (error) {
+        console.error('[Cosmos] Erro:', error);
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 600);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [name]);
+
+  const toggleSelection = (item: CosmosProduct) => {
+    setSelectedItems(prev => {
+      const exists = prev.find(i => i.gtin === item.gtin);
+      if (exists) {
+        return prev.filter(i => i.gtin !== item.gtin);
+      }
+      return [...prev, item];
+    });
+  };
 
   const handleAddItem = async () => {
     if (!user) {
@@ -34,113 +82,149 @@ export default function AddItemScreen() {
       return;
     }
 
-    if (!selectedItem) {
-      Alert.alert('Aviso', 'Selecione um item primeiro.');
-      return;
-    }
-
     try {
-      await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
-        name: selectedItem.name,
-        price: selectedItem.price,
-        checked: false,
-        category: 'Outros', // Pode ser expandido futuramente
-        createdAt: serverTimestamp(),
-      });
+      if (selectedItems.length > 0) {
+        // Salva todos os itens selecionados
+        for (const item of selectedItems) {
+          const itemToAdd = {
+            name: item.description,
+            price: item.avg_price?.toString() || '',
+            brand: item.brand?.name || '',
+            thumbnail: item.thumbnail || ''
+          };
+
+          await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
+            ...itemToAdd,
+            checked: false,
+            category: 'Outros',
+            createdAt: serverTimestamp(),
+          });
+        }
+      } else {
+        // Se nenhum item foi selecionado, salva o texto digitado
+        if (!name.trim()) {
+          Alert.alert('Aviso', 'Digite o nome do produto ou selecione na lista.');
+          return;
+        }
+
+        await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
+          name: name,
+          price: '',
+          brand: '',
+          thumbnail: '',
+          checked: false,
+          category: 'Outros',
+          createdAt: serverTimestamp(),
+        });
+      }
       router.back();
     } catch (error) {
-      Alert.alert('Erro', 'Não foi possível salvar o item.');
+      Alert.alert('Erro', 'Não foi possível salvar os itens.');
     }
   };
 
   return (
-    <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
-      
-      <View style={styles.header}>
-        <SafeAreaView>
-          <View style={styles.headerTop}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-              <Ionicons name="chevron-back" size={28} color="#fff" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Adicionar item</Text>
-            <View style={{ width: 40 }} />
-          </View>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+    >
+      <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
 
-          <View style={styles.searchContainer}>
-            <Ionicons name="search" size={20} color="#94A3B8" style={styles.searchIcon} />
-            <TextInput
-                style={styles.searchInput}
-                placeholder="logurte"
-                value={search}
-                onChangeText={setSearch}
-                placeholderTextColor="#94A3B8"
-            />
-          </View>
-        </SafeAreaView>
+      <View style={styles.header}>
+        <View style={styles.headerTop}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+            <Ionicons name="chevron-back" size={28} color="#fff" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Adicionar item</Text>
+          <View style={{ width: 40 }} />
+        </View>
+
+        <View style={styles.inputWrapper}>
+          <Ionicons name="cart-outline" size={20} color="#94A3B8" style={styles.inputIcon} />
+          <TextInput
+            placeholder="Nome do produto"
+            value={name}
+            onChangeText={setName}
+            placeholderTextColor="#94A3B8"
+            autoFocus
+            returnKeyType="search"
+          />
+          {searching && (
+            <ActivityIndicator size="small" color={PRIMARY_GREEN} style={{ marginLeft: 8 }} />
+          )}
+        </View>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        
-        <Text style={styles.sectionTitle}>COMÉRCIO LOCAL</Text>
-        <View style={styles.resultCard}>
-            <PriceRow 
-              name="Iogurte Natural 170g" 
-              price="R$ 3,49" 
-              color="#00A36C" 
-              active={selectedItem?.name === "Iogurte Natural 170g"}
-              onPress={() => setSelectedItem({ name: "Iogurte Natural 170g", price: "3,49" })}
-            />
-            <PriceRow 
-              name="Iogurte Grego 100g" 
-              price="R$ 4,20" 
-              color="#00A36C" 
-              active={selectedItem?.name === "Iogurte Grego 100g"}
-              onPress={() => setSelectedItem({ name: "Iogurte Grego 100g", price: "4,20" })}
-            />
-        </View>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Loader de pesquisa */}
+        {searching && (
+          <View style={styles.loaderContainer}>
+            <ActivityIndicator size="large" color={PRIMARY_GREEN} />
+            <Text style={styles.loaderText}>Pesquisando produto...</Text>
+          </View>
+        )}
 
-        <Text style={styles.sectionTitle}>VAREJO DIGITAL</Text>
-        <View style={styles.resultCard}>
-            <PriceRow 
-              name="Pack 6 unidades" 
-              price="R$ 15,90" 
-              color="#00A36C" 
-              active={selectedItem?.name === "Pack 6 unidades"}
-              onPress={() => setSelectedItem({ name: "Pack 6 unidades", price: "15,90" })}
-            />
-        </View>
+        {/* Lista de resultados */}
+        {!searching && results.length > 0 && (
+          <View style={styles.resultsContainer}>
+            <Text style={styles.resultsTitle}>RESULTADOS ENCONTRADOS</Text>
+            {results.map((item, index) => {
+              const isSelected = selectedItems.some(i => i.gtin === item.gtin);
+              return (
+                <TouchableOpacity
+                  key={index}
+                  style={[styles.resultItem, isSelected && styles.resultItemActive]}
+                  onPress={() => toggleSelection(item)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.resultLeft}>
+                    <View style={[styles.statusDot, { backgroundColor: isSelected ? PRIMARY_GREEN : '#E2E8F0' }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.resultBrand}>{item.brand?.name || 'Marca n/i'}</Text>
+                      <Text style={styles.resultName} numberOfLines={2}>{item.description}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.resultPrice}>
+                    {item.avg_price ? `R$ ${item.avg_price.toFixed(2)}` : '--'}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
 
-        <View style={styles.aiSuggestion}>
-            <Text style={styles.aiLabel}>LUCA encontrou</Text>
-            <Text style={styles.aiText}>Online está 14% mais barato. Comprar em pack economiza R$ 5,04.</Text>
-        </View>
+        {/* Nenhum resultado */}
+        {!searching && name.trim().length >= 3 && results.length === 0 && (
+          <View style={styles.noResultContainer}>
+            <Ionicons name="search-outline" size={36} color="#CBD5E1" />
+            <Text style={styles.noResultText}>Nenhum produto encontrado{"\n"}para "{name}"</Text>
+          </View>
+        )}
 
-        <TouchableOpacity 
-          style={[styles.addButton, !selectedItem && { opacity: 0.5 }]}
+        <TouchableOpacity
+          style={[styles.addButton, (!name.trim() && selectedItems.length === 0) && { opacity: 0.5 }]}
           onPress={handleAddItem}
-          disabled={!selectedItem}
+          disabled={(!name.trim() && selectedItems.length === 0) || searching}
+          activeOpacity={0.85}
         >
-          <Text style={styles.addButtonText}>Adicionar à lista</Text>
+          <Text style={styles.addButtonText}>
+            {selectedItems.length > 0
+              ? `Adicionar ${selectedItems.length} item${selectedItems.length > 1 ? 's' : ''}`
+              : 'Adicionar à lista'
+            }
+          </Text>
         </TouchableOpacity>
 
       </ScrollView>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
-function PriceRow({ name, price, color, active, onPress }: any) {
-  return (
-    <TouchableOpacity 
-      style={[styles.priceRow, active && styles.priceRowActive]} 
-      onPress={onPress}
-    >
-      <View style={[styles.dot, { backgroundColor: active ? PRIMARY_GREEN : '#E2E8F0' }]} />
-      <Text style={[styles.rowText, active && { color: PRIMARY_GREEN }]}>{name}</Text>
-      <Text style={[styles.rowPrice, active && { color: PRIMARY_GREEN }]}>{price}</Text>
-    </TouchableOpacity>
-  );
-}
 
 const styles = StyleSheet.create({
   container: {
@@ -149,8 +233,9 @@ const styles = StyleSheet.create({
   },
   header: {
     backgroundColor: PRIMARY_GREEN,
-    paddingHorizontal: 25,
-    paddingBottom: 25,
+    paddingHorizontal: 20,
+    paddingTop: STATUS_BAR_HEIGHT,
+    paddingBottom: 24,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
   },
@@ -158,20 +243,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: Platform.OS === 'android' ? 10 : 0,
     marginBottom: 20,
   },
   headerTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '900',
     color: '#fff',
   },
   backButton: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     justifyContent: 'center',
+    alignItems: 'flex-start',
   },
-  searchContainer: {
+  inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
@@ -179,82 +264,101 @@ const styles = StyleSheet.create({
     paddingHorizontal: 15,
     height: 52,
   },
-  searchIcon: {
+  inputIcon: {
     marginRight: 10,
   },
-  searchInput: {
+  input: {
     flex: 1,
     fontSize: 16,
     color: TEXT_DARK,
     fontWeight: '500',
+    height: '100%',
+    ...Platform.select({
+      web: { outlineStyle: 'none' },
+    }),
   },
   scrollContent: {
-    paddingHorizontal: 25,
-    paddingTop: 25,
-    paddingBottom: 40,
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 50,
+    minHeight: height * 0.6,
   },
-  sectionTitle: {
+  loaderContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
+  loaderText: {
+    marginTop: 12,
+    color: TEXT_GRAY,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  noResultContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
+  noResultText: {
+    marginTop: 12,
+    color: '#94A3B8',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  resultsContainer: {
+    marginBottom: 30,
+  },
+  resultsTitle: {
     fontSize: 12,
     fontWeight: '800',
     color: '#94A3B8',
     letterSpacing: 1,
     marginBottom: 15,
-    marginTop: 10,
   },
-  resultCard: {
+  resultItem: {
     backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 10,
-    marginBottom: 25,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.02,
-    shadowRadius: 5,
-    elevation: 1,
-  },
-  priceRow: {
+    borderRadius: 20,
+    padding: 16,
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 12,
-    borderRadius: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
   },
-  priceRowActive: {
+  resultItemActive: {
+    borderColor: PRIMARY_GREEN,
     backgroundColor: '#F0FDF4',
   },
-  dot: {
+  resultLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  statusDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
     marginRight: 12,
   },
-  rowText: {
-    flex: 1,
-    fontSize: 15,
-    color: TEXT_DARK,
-    fontWeight: '600',
+  resultBrand: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: PRIMARY_GREEN,
+    textTransform: 'uppercase',
   },
-  rowPrice: {
-    fontSize: 15,
+  resultName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: TEXT_DARK,
+    width: '85%',
+  },
+  resultPrice: {
+    fontSize: 14,
     fontWeight: '800',
     color: TEXT_GRAY,
-  },
-  aiSuggestion: {
-    backgroundColor: '#DCFCE7',
-    padding: 20,
-    borderRadius: 20,
-    marginBottom: 30,
-  },
-  aiLabel: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: '#166534',
-    marginBottom: 5,
-  },
-  aiText: {
-    fontSize: 14,
-    color: '#166534',
-    lineHeight: 20,
-    fontWeight: '500',
   },
   addButton: {
     backgroundColor: PRIMARY_GREEN,
@@ -267,6 +371,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 10,
     elevation: 5,
+    marginTop: 10,
   },
   addButtonText: {
     color: '#fff',
