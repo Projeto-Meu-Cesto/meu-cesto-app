@@ -1,50 +1,51 @@
-# Welcome to your Expo app 👋
+# Meu Cesto 🛒
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+**Meu Cesto** é um aplicativo móvel desenvolvido para facilitar o gerenciamento de listas de compras e controle de gastos em tempo real. Este é um projeto acadêmico desenvolvido para o **5º período** da faculdade.
 
-## Get started
+## 👥 Autores
+- **Guilherme Sant'Ana**
+- **Antonio Gomes**
 
-1. Install dependencies
+---
 
+## 🚀 Sobre o Projeto
+O objetivo do Meu Cesto é proporcionar uma experiência moderna e fluida para quem deseja organizar suas compras semanais, monitorar o orçamento mensal e descobrir produtos através de uma integração inteligente com APIs de mercado.
+
+## ✨ Funcionalidades Principais
+- **Autenticação Segura**: Sistema de login e cadastro integrado ao Firebase Auth.
+- **Sincronização em Tempo Real**: Listas de compras sincronizadas instantaneamente via Cloud Firestore.
+- **Busca de Produtos (API Cosmos)**: Pesquisa inteligente de produtos por nome, trazendo informações detalhadas.
+- **Seleção Múltipla**: Adicione vários itens à sua lista de uma só vez.
+- **Pull-to-Refresh**: Interface responsiva com gestos nativos para atualização de dados.
+- **Sistema de Notificações (Toasts)**: Feedback visual moderno para todas as ações do usuário.
+- **Dashboards de Gastos**: Visualize seus gastos mensais e por categoria de forma intuitiva.
+
+## 🛠️ Tecnologias Utilizadas
+- [**Expo**](https://expo.dev/) & [**React Native**](https://reactnative.dev/)
+- [**Firebase**](https://firebase.google.com/) (Auth & Firestore)
+- [**React Native Reanimated**](https://docs.swmansion.com/react-native-reanimated/) (Animações premium)
+- [**Expo Router**](https://docs.expo.dev/router/introduction/) (Navegação baseada em arquivos)
+- [**Ionicons**](https://ionic.io/ionicons) (Ícones)
+
+## 📦 Como rodar o projeto
+
+1. **Instale as dependências:**
    ```bash
    npm install
    ```
 
-2. Start the app
+2. **Configure o Firebase:**
+   Certifique-se de que o arquivo `scripts/firebaseConfig.ts` contém suas credenciais válidas do Firebase.
 
+3. **Inicie o servidor de desenvolvimento:**
    ```bash
    npx expo start
    ```
 
-In the output, you'll find options to open the app in a
+4. **Abra o app:**
+   - Use o app **Expo Go** no seu celular físico (recomendado).
+   - Ou use um emulador Android/iOS.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+---
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
-```
-
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Este projeto foi desenvolvido com foco em UI/UX moderno, seguindo as melhores práticas de desenvolvimento mobile.
