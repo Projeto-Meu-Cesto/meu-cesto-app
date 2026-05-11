@@ -1,7 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
+  Animated,
+  Dimensions,
+  FlatList,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -9,244 +16,444 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  Dimensions,
-  Platform,
 } from 'react-native';
+import { getLucaResponse } from '../scripts/aiService';
+import { auth } from '../scripts/firebaseConfig';
 
+const { width } = Dimensions.get('window');
 const PRIMARY_GREEN = '#00A36C';
-const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
 
-export default function LucaScreen() {
-  const router = useRouter();
+interface Message {
+  id: string;
+  text: string;
+  sender: 'user' | 'luca';
+}
+
+type GeminiHistory = {
+  role: 'user' | 'model';
+  parts: { text: string }[];
+};
+
+const QUICK_ACTIONS = [
+  { id: '1', label: 'Como economizar no mercado?', icon: 'leaf-outline' },
+  { id: '2', label: 'Analise meus gastos do mês', icon: 'stats-chart-outline' },
+  { id: '3', label: 'Dicas de lista de compras', icon: 'list-outline' },
+  { id: '4', label: 'Produtos mais baratos', icon: 'pricetag-outline' },
+];
+
+// Dot loader animado
+function TypingDots() {
+  const dots = [useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current];
+
+  React.useEffect(() => {
+    const animations = dots.map((dot, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * 200),
+          Animated.timing(dot, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(dot, { toValue: 0, duration: 400, useNativeDriver: true }),
+        ])
+      )
+    );
+    animations.forEach(a => a.start());
+    return () => animations.forEach(a => a.stop());
+  }, []);
 
   return (
-    <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
-      
-      <View style={styles.header}>
-        <View>
-          <View style={styles.headerTop}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-              <Ionicons name="chevron-back" size={28} color="#fff" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Insights</Text>
-            <View style={{ width: 40 }} />
-          </View>
-        </View>
-      </View>
-
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        
-        <View style={styles.lucaHeader}>
-            <View style={styles.lucaIconBg}>
-                <Ionicons name="cart" size={40} color={PRIMARY_GREEN} />
-            </View>
-            <Text style={styles.lucaGreeting}>Olá, eu sou o LUCA</Text>
-            <Text style={styles.lucaSubtitle}>Dicas personalizadas para você</Text>
-        </View>
-
-        <View style={styles.cardsContainer}>
-            <InsightCard 
-                icon="warning" 
-                color="#EF4444" 
-                title="Gastos com mercado subiram" 
-                desc="Alimentação subiu 22% este mês. Veja o que está pesando mais." 
-            />
-            <InsightCard 
-                icon="cart" 
-                color={PRIMARY_GREEN} 
-                title="Compras frequentes repetidas" 
-                desc="Iogurte comprado 6x. Comprar em quantidade economiza R$ 12." 
-            />
-            <InsightCard 
-                icon="time" 
-                color="#F59E0B" 
-                title="Meta de economia próxima" 
-                desc="Você está a R$ 50 de bater sua meta. Continue assim!" 
-            />
-        </View>
-
-        <TouchableOpacity style={styles.pdfButton}>
-            <Text style={styles.pdfButtonText}>Gerar relatório PDF</Text>
-        </TouchableOpacity>
-
-      </ScrollView>
-
-      <View style={styles.inputContainer}>
-        <TextInput 
-            style={styles.chatInput} 
-            placeholder="Envie uma mensagem..."
-            placeholderTextColor="#94A3B8"
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4 }}>
+      {dots.map((dot, i) => (
+        <Animated.View
+          key={i}
+          style={{
+            width: 8, height: 8, borderRadius: 4,
+            backgroundColor: PRIMARY_GREEN,
+            opacity: dot,
+            transform: [{ scale: dot.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }) }],
+          }}
         />
-        <TouchableOpacity style={styles.sendButton}>
-            <Ionicons name="send" size={20} color="#fff" />
-        </TouchableOpacity>
-      </View>
+      ))}
     </View>
   );
 }
 
-function InsightCard({ icon, color, title, desc }: any) {
+export default function LucaScreen() {
+  const router = useRouter();
+  const user = auth.currentUser;
+  const userName = user?.displayName?.split(' ')[0] || 'amigo';
+
+  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(false);
+  // Histórico no formato Gemini, mantido em paralelo
+  const geminiHistory = useRef<GeminiHistory[]>([]);
+  const flatListRef = useRef<FlatList>(null);
+
+  const hasMessages = messages.length > 0;
+
+  const sendMessage = useCallback(async (textToSend: string) => {
+    if (!textToSend.trim() || loading) return;
+
+    const userMsg: Message = { id: Date.now().toString(), text: textToSend, sender: 'user' };
+    setMessages(prev => [...prev, userMsg]);
+    setInput('');
+    setLoading(true);
+
+    // Rola para o final após adicionar mensagem
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 50);
+
+    try {
+      // Chama a IA com o histórico atual + nova mensagem
+      const responseText = await getLucaResponse(geminiHistory.current, textToSend);
+
+      // Atualiza o histórico Gemini com o par user→model
+      geminiHistory.current = [
+        ...geminiHistory.current,
+        { role: 'user', parts: [{ text: textToSend }] },
+        { role: 'model', parts: [{ text: responseText }] },
+      ];
+
+      const lucaMsg: Message = { id: (Date.now() + 1).toString(), text: responseText, sender: 'luca' };
+      setMessages(prev => [...prev, lucaMsg]);
+    } catch (err) {
+      console.error('[Luca] Erro:', err);
+      const errMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        text: 'Desculpe, tive um problema. Pode tentar novamente?',
+        sender: 'luca',
+      };
+      setMessages(prev => [...prev, errMsg]);
+    } finally {
+      setLoading(false);
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    }
+  }, [loading]);
+
+  const renderMessage = useCallback(({ item }: { item: Message }) => {
+    const isUser = item.sender === 'user';
+    return (
+      <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowLuca]}>
+        {!isUser && (
+          <View style={styles.avatarMini}>
+            <Ionicons name="sparkles" size={13} color={PRIMARY_GREEN} />
+          </View>
+        )}
+        <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleLuca]}>
+          <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
+            {item.text}
+          </Text>
+        </View>
+      </View>
+    );
+  }, []);
+
   return (
-    <View style={styles.insightCard}>
-      <View style={[styles.insightIconWrapper, { backgroundColor: color + '10' }]}>
-        <Ionicons name={icon} size={24} color={color} />
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+    >
+      <StatusBar barStyle="dark-content" backgroundColor="#fff" translucent />
+
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
+          <Ionicons name="chevron-back" size={24} color={TEXT_DARK} />
+        </TouchableOpacity>
+
+        <View style={styles.headerCenter}>
+          <View style={styles.onlineDot} />
+          <Text style={styles.headerName}>Luca</Text>
+          <Text style={styles.headerSub}>Online</Text>
+        </View>
+
+        <View style={{ width: 40 }} />
       </View>
-      <View style={styles.insightContent}>
-        <Text style={styles.insightTitle}>{title}</Text>
-        <Text style={styles.insightDesc}>{desc}</Text>
+
+      {/* Mensagens ou Tela inicial */}
+      {!hasMessages ? (
+        <View style={styles.emptyState}>
+          <Image
+            source={require('../assets/images/Meu-Cesto-Logo.png')}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+          <Text style={styles.greetingTitle}>Olá, {userName} 👋</Text>
+          <Text style={styles.greetingSubtitle}>Como eu posso te ajudar hoje?</Text>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.quickScroll}
+            style={styles.quickScrollContainer}
+          >
+            {QUICK_ACTIONS.map(action => (
+              <TouchableOpacity
+                key={action.id}
+                style={styles.chip}
+                onPress={() => sendMessage(action.label)}
+                activeOpacity={0.7}
+              >
+                <Ionicons name={action.icon as any} size={16} color={PRIMARY_GREEN} />
+                <Text style={styles.chipText}>{action.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      ) : (
+        <FlatList
+          ref={flatListRef}
+          data={messages}
+          keyExtractor={item => item.id}
+          renderItem={renderMessage}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+          onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+          ListFooterComponent={
+            loading ? (
+              <View style={[styles.messageRow, styles.messageRowLuca]}>
+                <View style={styles.avatarMini}>
+                  <Ionicons name="sparkles" size={13} color={PRIMARY_GREEN} />
+                </View>
+                <View style={[styles.bubble, styles.bubbleLuca]}>
+                  <TypingDots />
+                </View>
+              </View>
+            ) : null
+          }
+        />
+      )}
+
+      {/* Input Area */}
+      <View style={styles.inputArea}>
+        <View style={styles.inputBox}>
+          <TextInput
+            style={styles.textInput}
+            placeholder="Mensagem..."
+            placeholderTextColor="#94A3B8"
+            value={input}
+            onChangeText={setInput}
+            multiline
+            maxLength={1000}
+            onSubmitEditing={() => sendMessage(input)}
+            returnKeyType="send"
+          />
+          <TouchableOpacity
+            style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]}
+            onPress={() => sendMessage(input)}
+            disabled={!input.trim() || loading}
+            activeOpacity={0.8}
+          >
+            {loading
+              ? <ActivityIndicator size="small" color="#fff" />
+              : <Ionicons name="arrow-up" size={20} color="#fff" />
+            }
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.disclaimer}>Luca pode cometer erros. Verifique informações importantes.</Text>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: BG_LIGHT,
+    backgroundColor: '#fff',
   },
   header: {
-    backgroundColor: PRIMARY_GREEN,
-    paddingHorizontal: 25,
-    paddingBottom: 15,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
-  },
-  headerTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: Platform.OS === 'android' ? 10 : 0,
+    paddingHorizontal: 15,
+    paddingTop: Platform.OS === 'ios' ? 60 : (StatusBar.currentHeight ?? 24) + 10,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    backgroundColor: '#fff',
   },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: '#fff',
-  },
-  backButton: {
+  headerBtn: {
     width: 40,
     height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F8FAFC',
     justifyContent: 'center',
-  },
-  scrollContent: {
-    paddingHorizontal: 25,
-    paddingTop: 30,
-    paddingBottom: 120,
-  },
-  lucaHeader: {
     alignItems: 'center',
-    marginBottom: 35,
   },
-  lucaIconBg: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+  headerCenter: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  onlineDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#22C55E',
+    marginBottom: 2,
+  },
+  headerName: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    lineHeight: 18,
+  },
+  headerSub: {
+    fontSize: 11,
+    color: '#22C55E',
+    fontWeight: '600',
+  },
+
+  // Empty state
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  logo: {
+    width: 90,
+    height: 90,
+    marginBottom: 28,
+  },
+  greetingTitle: {
+    fontSize: 26,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  greetingSubtitle: {
+    fontSize: 16,
+    color: TEXT_GRAY,
+    fontWeight: '500',
+    marginBottom: 40,
+    textAlign: 'center',
+    lineHeight: 24,
+  },
+  quickScrollContainer: {
+    flexGrow: 0,
+    marginBottom: 10,
+  },
+  quickScroll: {
+    paddingHorizontal: 5,
+    gap: 10,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#DCFCE7',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 20,
+    gap: 8,
+  },
+  chipText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: TEXT_DARK,
+  },
+
+  // Messages
+  listContent: {
+    padding: 20,
+    paddingBottom: 10,
+    gap: 12,
+  },
+  messageRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    maxWidth: '88%',
+  },
+  messageRowUser: {
+    alignSelf: 'flex-end',
+    flexDirection: 'row-reverse',
+  },
+  messageRowLuca: {
+    alignSelf: 'flex-start',
+  },
+  avatarMini: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
     backgroundColor: '#DCFCE7',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 15,
+    flexShrink: 0,
   },
-  lucaGreeting: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: TEXT_DARK,
-    marginBottom: 5,
+  bubble: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 22,
+    flexShrink: 1,
   },
-  lucaSubtitle: {
-    fontSize: 14,
-    color: TEXT_GRAY,
-    fontWeight: '500',
-  },
-  cardsContainer: {
-    gap: 15,
-    marginBottom: 30,
-  },
-  insightCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 20,
-    flexDirection: 'row',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.02,
-    shadowRadius: 5,
-    elevation: 1,
-    borderWidth: 1,
-    borderColor: '#F1F5F9',
-  },
-  insightIconWrapper: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 15,
-  },
-  insightContent: {
-    flex: 1,
-  },
-  insightTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: TEXT_DARK,
-    marginBottom: 5,
-  },
-  insightDesc: {
-    fontSize: 13,
-    color: TEXT_GRAY,
-    lineHeight: 18,
-    fontWeight: '500',
-  },
-  pdfButton: {
+  bubbleUser: {
     backgroundColor: PRIMARY_GREEN,
-    height: 56,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    elevation: 5,
+    borderBottomRightRadius: 5,
   },
-  pdfButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '800',
+  bubbleLuca: {
+    backgroundColor: '#F1F5F9',
+    borderBottomLeftRadius: 5,
   },
-  inputContainer: {
-    position: 'absolute',
-    bottom: 30,
-    left: 25,
-    right: 25,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 28,
-    paddingHorizontal: 20,
-    height: 56,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: '#F1F5F9',
-  },
-  chatInput: {
-    flex: 1,
+  bubbleText: {
     fontSize: 15,
     color: TEXT_DARK,
+    lineHeight: 22,
     fontWeight: '500',
   },
-  sendButton: {
+  bubbleTextUser: {
+    color: '#fff',
+  },
+
+  // Input
+  inputArea: {
+    paddingHorizontal: 15,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === 'ios' ? 35 : 15,
+    backgroundColor: '#fff',
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  inputBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 28,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    gap: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  textInput: {
+    flex: 1,
+    fontSize: 16,
+    color: TEXT_DARK,
+    fontWeight: '500',
+    maxHeight: 120,
+    paddingTop: Platform.OS === 'ios' ? 8 : 6,
+    paddingBottom: Platform.OS === 'ios' ? 8 : 6,
+  },
+  sendBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: PRIMARY_GREEN,
+    backgroundColor: TEXT_DARK,
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
+  },
+  sendBtnDisabled: {
+    backgroundColor: '#CBD5E1',
+  },
+  disclaimer: {
+    fontSize: 11,
+    color: '#94A3B8',
+    textAlign: 'center',
+    marginTop: 8,
+    fontWeight: '500',
   },
 });

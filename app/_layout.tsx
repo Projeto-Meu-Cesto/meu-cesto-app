@@ -37,7 +37,7 @@ export default function RootLayout() {
 
     if (!user && inAuthGroup) {
       router.replace('/');
-    } else if (user && segments[0] !== '(tabs)' && segments[0] !== 'onboarding' && segments[0] !== 'addItem') {
+    } else if (user && segments[0] !== '(tabs)' && segments[0] !== 'onboarding' && segments[0] !== 'addItem' && segments[0] !== 'luca') {
       router.replace('/(tabs)/home');
     }
   }, [user, loading, segments]);

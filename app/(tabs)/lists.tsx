@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { collection, doc, onSnapshot, orderBy, query, updateDoc } from 'firebase/firestore';
+import { collection, deleteDoc, doc, onSnapshot, orderBy, query, updateDoc } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
+  Animated,
   Dimensions,
   Platform,
   RefreshControl,
@@ -18,33 +19,62 @@ import { auth, db } from '../../scripts/firebaseConfig';
 const { width } = Dimensions.get('window');
 const STATUS_BAR_HEIGHT = Platform.OS === 'android'
   ? (StatusBar.currentHeight ?? 24)
-  : 44;
+  : 54;
 
 const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
 
-const INITIAL_ITEMS = [
-  { id: '1', name: 'Leite Integral', price: 'R$ 8,90', checked: true },
-  { id: '2', name: 'Pão de forma', price: 'R$ 12,50', checked: true },
-  { id: '3', name: 'Peito de Frango', price: 'R$ 27,80', checked: true },
-  { id: '4', name: 'Feijão 2kg', price: 'R$ 14,90', checked: false },
-  { id: '5', name: 'Arroz 5kg', price: 'R$ 18,90', checked: false },
-  { id: '6', name: 'Ovos (12 un)', price: 'R$ 15,90', checked: false },
-];
+// — Skeleton Loader —
+function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
+  const opacity = React.useRef(new Animated.Value(0.4)).current;
+  React.useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+  return (
+    <Animated.View
+      style={[{ width: w, height: h, backgroundColor: '#E2E8F0', borderRadius: 10, opacity }, style]}
+    />
+  );
+}
+
+function SkeletonListItem() {
+  return (
+    <View style={skStyles.row}>
+      <SkeletonBox width={22} height={22} style={{ borderRadius: 6, marginRight: 14 }} />
+      <SkeletonBox width="55%" height={14} />
+      <SkeletonBox width={40} height={14} style={{ marginLeft: 'auto' }} />
+    </View>
+  );
+}
+
+const skStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 10,
+  },
+});
 
 export default function ListsScreen() {
   const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const router = useRouter();
   const user = auth.currentUser;
 
   const onRefresh = React.useCallback(() => {
     setRefreshing(true);
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 1500);
+    setTimeout(() => setRefreshing(false), 1500);
   }, []);
 
   useEffect(() => {
@@ -61,6 +91,7 @@ export default function ListsScreen() {
         list.push({ id: doc.id, ...doc.data() });
       });
       setItems(list);
+      setLoading(false);
     });
 
     return () => unsub();
@@ -73,6 +104,16 @@ export default function ListsScreen() {
       await updateDoc(itemRef, { checked: !currentStatus });
     } catch (error) {
       console.error("Erro ao atualizar item:", error);
+    }
+  };
+
+  const handleDelete = async (itemId: string) => {
+    if (!user) return;
+    try {
+      const itemRef = doc(db, 'users', user.uid, 'shopping_list', itemId);
+      await deleteDoc(itemRef);
+    } catch (error) {
+      console.error("Erro ao deletar item:", error);
     }
   };
 
@@ -100,31 +141,27 @@ export default function ListsScreen() {
       <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
 
       <View style={styles.header}>
-        <View>
-          <View style={styles.headerTop}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-              <Ionicons name="chevron-back" size={28} color="#fff" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Minha lista</Text>
-            <TouchableOpacity style={styles.notificationCircle}>
-              <Ionicons name="ellipsis-horizontal" size={20} color="#fff" />
-            </TouchableOpacity>
-          </View>
+        <View style={styles.headerTop}>
+          <View style={{ width: 44 }} />
+          <Text style={styles.headerTitle}>Minha lista</Text>
+          <TouchableOpacity style={styles.menuButton}>
+            <Ionicons name="ellipsis-horizontal" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
 
-          <View style={styles.progressCard}>
-            <View style={styles.progressHeader}>
-              <View>
-                <Text style={styles.progressLabel}>No carrinho</Text>
-                <Text style={styles.progressAmount}>R$ {totalInCart.toFixed(2).replace('.', ',')}</Text>
-              </View>
-              <View style={{ alignItems: 'flex-end' }}>
-                <Text style={styles.progressLabel}>Total estimado</Text>
-                <Text style={styles.progressAmount}>R$ {totalEstimated.toFixed(2).replace('.', ',')}</Text>
-              </View>
+        <View style={styles.progressCard}>
+          <View style={styles.progressHeader}>
+            <View>
+              <Text style={styles.progressLabel}>No carrinho</Text>
+              <Text style={styles.progressAmount}>R$ {totalInCart.toFixed(2).replace('.', ',')}</Text>
             </View>
-            <View style={styles.progressBarBg}>
-              <View style={[styles.progressBarFill, { width: `${progress * 100}%` }]} />
+            <View style={{ alignItems: 'flex-end' }}>
+              <Text style={styles.progressLabel}>Total estimado</Text>
+              <Text style={styles.progressAmount}>R$ {totalEstimated.toFixed(2).replace('.', ',')}</Text>
             </View>
+          </View>
+          <View style={styles.progressBarBg}>
+            <View style={[styles.progressBarFill, { width: `${progress * 100}%` as any }]} />
           </View>
         </View>
       </View>
@@ -141,67 +178,97 @@ export default function ListsScreen() {
           />
         }
       >
-
-        {stillMissing.length > 0 && (
+        {loading ? (
           <>
-            <Text style={styles.sectionTitle}>MINHA LISTA DE COMPRAS</Text>
-            <View style={styles.listSection}>
-              {stillMissing.map((item) => (
-                <ShoppingItem
-                  key={item.id}
-                  name={item.name}
-                  price={item.price}
-                  checked={false}
-                  onPress={() => toggleItem(item.id, false)}
-                />
-              ))}
-            </View>
+            <SkeletonListItem />
+            <SkeletonListItem />
+            <SkeletonListItem />
+            <SkeletonListItem />
+          </>
+        ) : (
+          <>
+            {stillMissing.length > 0 && (
+              <>
+                <Text style={styles.sectionTitle}>MINHA LISTA DE COMPRAS</Text>
+                <View style={styles.listSection}>
+                  {stillMissing.map((item) => (
+                    <ShoppingItem
+                      key={item.id}
+                      itemId={item.id}
+                      name={item.name}
+                      price={item.price}
+                      checked={false}
+                      onPress={() => toggleItem(item.id, false)}
+                      handleDelete={handleDelete}
+                    />
+                  ))}
+                </View>
+              </>
+            )}
+
+            {alreadyInCart.length > 0 && (
+              <>
+                <Text style={[styles.sectionTitle, { marginTop: 20 }]}>JÁ NO CARRINHO</Text>
+                <View style={styles.listSection}>
+                  {alreadyInCart.map((item) => (
+                    <ShoppingItem
+                      key={item.id}
+                      itemId={item.id}
+                      name={item.name}
+                      price={item.price}
+                      checked={true}
+                      onPress={() => toggleItem(item.id, true)}
+                      handleDelete={handleDelete}
+                    />
+                  ))}
+                </View>
+              </>
+            )}
+
+            {items.length === 0 && (
+              <View style={styles.emptyContainer}>
+                <Ionicons name="cart-outline" size={60} color="#CBD5E1" />
+                <Text style={styles.emptyText}>Sua lista está vazia.</Text>
+                <TouchableOpacity style={styles.emptyButton} onPress={() => router.push('/addItem')}>
+                  <Text style={styles.emptyButtonText}>Adicionar primeiro item</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </>
         )}
-
-        {alreadyInCart.length > 0 && (
-          <>
-            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>JÁ NO CARRINHO</Text>
-            <View style={styles.listSection}>
-              {alreadyInCart.map((item) => (
-                <ShoppingItem
-                  key={item.id}
-                  name={item.name}
-                  price={item.price}
-                  checked={true}
-                  onPress={() => toggleItem(item.id, true)}
-                />
-              ))}
-            </View>
-          </>
-        )}
-
-        {items.length === 0 && (
-          <View style={styles.emptyContainer}>
-            <Ionicons name="cart-outline" size={60} color="#CBD5E1" />
-            <Text style={styles.emptyText}>Sua lista está vazia.</Text>
-            <TouchableOpacity style={styles.emptyButton} onPress={() => router.push('/addItem')}>
-              <Text style={styles.emptyButtonText}>Adicionar primeiro item</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-
       </ScrollView>
+
+      <TouchableOpacity
+        style={styles.fab}
+        onPress={() => router.push('/addItem')}
+      >
+        <Ionicons name="add" size={32} color="#fff" />
+      </TouchableOpacity>
     </View>
   );
 }
 
-function ShoppingItem({ name, price, checked, onPress }: any) {
+function ShoppingItem({ name, price, checked, onPress, handleDelete, itemId }: any) {
   return (
-    <TouchableOpacity style={styles.itemRow} onPress={onPress}>
-      <View style={styles.itemLeft}>
+    <View style={styles.itemRow}>
+      <TouchableOpacity style={styles.itemLeft} onPress={onPress} activeOpacity={0.7}>
         <View style={[styles.checkbox, checked && styles.checkboxChecked]}>
           {checked && <Ionicons name="checkmark" size={14} color="#fff" />}
         </View>
         <Text style={[styles.itemName, checked && styles.itemNameChecked]}>{name}</Text>
+      </TouchableOpacity>
+
+      <View style={styles.itemRight}>
+        {price ? (
+          <Text style={[styles.itemPrice, checked && styles.itemPriceChecked]}>
+            R$ {price}
+          </Text>
+        ) : null}
+        <TouchableOpacity onPress={() => handleDelete(itemId)} style={styles.deleteBtn}>
+          <Ionicons name="trash-outline" size={18} color="#FF5252" />
+        </TouchableOpacity>
       </View>
-      <Text style={[styles.itemPrice, checked && styles.itemPriceChecked]}>R$ {price}</Text>
-    </TouchableOpacity>
+    </View>
   );
 }
 
@@ -223,11 +290,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 25,
+    marginTop: 10,
   },
   headerTitle: {
     fontSize: 18,
     fontWeight: '900',
     color: '#fff',
+    flex: 1,
+    textAlign: 'center',
   },
   backButton: {
     width: 44,
@@ -235,7 +305,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'flex-start',
   },
-  notificationCircle: {
+  menuButton: {
     width: 44,
     height: 44,
     borderRadius: 22,
@@ -279,7 +349,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 25,
     paddingTop: 30,
-    paddingBottom: 40,
+    paddingBottom: 130,
   },
   sectionTitle: {
     fontSize: 12,
@@ -302,13 +372,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 14,
+    paddingVertical: 12,
     paddingHorizontal: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F8FAFC',
   },
   itemLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
+  },
+  itemRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
   },
   checkbox: {
     width: 22,
@@ -316,7 +393,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 2,
     borderColor: '#E2E8F0',
-    marginRight: 15,
+    marginRight: 14,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -324,64 +401,27 @@ const styles = StyleSheet.create({
     backgroundColor: PRIMARY_GREEN,
     borderColor: PRIMARY_GREEN,
   },
-  itemInfo: {
-    flex: 1,
-  },
   itemName: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: TEXT_DARK,
-  },
-  itemPrice: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: TEXT_GRAY,
+    flexShrink: 1,
   },
   itemNameChecked: {
-    fontSize: 16,
-    fontWeight: '600',
     color: '#CBD5E1',
     textDecorationLine: 'line-through',
+    fontWeight: '600',
+  },
+  itemPrice: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: TEXT_GRAY,
   },
   itemPriceChecked: {
-    fontSize: 14,
-    fontWeight: '500',
     color: '#E2E8F0',
   },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 25,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: '#E2E8F0',
-  },
-  dividerText: {
-    marginHorizontal: 15,
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#94A3B8',
-  },
-  addButton: {
-    backgroundColor: PRIMARY_GREEN,
-    height: 56,
-    borderRadius: 28,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 30,
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    elevation: 5,
-  },
-  addButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '800',
+  deleteBtn: {
+    padding: 6,
   },
   emptyContainer: {
     alignItems: 'center',
@@ -412,5 +452,21 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '800',
+  },
+  fab: {
+    position: 'absolute',
+    bottom: 110,
+    right: 25,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: PRIMARY_GREEN,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: PRIMARY_GREEN,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 15,
+    elevation: 8,
   },
 });

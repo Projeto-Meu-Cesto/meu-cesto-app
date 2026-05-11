@@ -3,14 +3,28 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
+const requiredVars = [
+    "EXPO_PUBLIC_FIREBASE_API_KEY",
+    "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN",
+    "EXPO_PUBLIC_FIREBASE_PROJECT_ID",
+    "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET",
+    "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
+    "EXPO_PUBLIC_FIREBASE_APP_ID",
+];
+
+requiredVars.forEach((key) => {
+    if (!process.env[key]) {
+        throw new Error(`❌ Firebase: variável ${key} não encontrada no .env`);
+    }
+});
 
 const firebaseConfig = {
-    apiKey: "AIzaSyCkYPBRFoXs4Vsuf7VRzfJwE3Fpm1sUp3c",
-    authDomain: "meu-cesto.firebaseapp.com",
-    projectId: "meu-cesto",
-    storageBucket: "meu-cesto.firebasestorage.app",
-    messagingSenderId: "398891587806",
-    appId: "1:398891587806:web:1618765685bb5847024a4f"
+    apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+    authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+    storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
 };
 
 const app = initializeApp(firebaseConfig);

@@ -2,83 +2,130 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React from 'react';
 import {
+  Animated,
+  Dimensions,
+  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  Dimensions,
-  Platform,
 } from 'react-native';
 
 const { width } = Dimensions.get('window');
+const STATUS_BAR_HEIGHT = Platform.OS === 'android'
+  ? (StatusBar.currentHeight ?? 24)
+  : 54;
 const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
 
+// — Skeleton Loader —
+function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
+  const opacity = React.useRef(new Animated.Value(0.4)).current;
+  React.useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+  return (
+    <Animated.View
+      style={[{ width: w, height: h, backgroundColor: '#E2E8F0', borderRadius: 10, opacity }, style]}
+    />
+  );
+}
+
 export default function StatsScreen() {
   const router = useRouter();
+  const [loading] = React.useState(false); // troque para true para ver skeleton
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
-      
-      <View style={styles.header}>
-        <View>
-          <View style={styles.headerTop}>
-            <TouchableOpacity onPress={() => router.back()}>
-                <Ionicons name="chevron-back" size={28} color="#fff" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Visão Geral</Text>
-            <TouchableOpacity style={styles.notificationCircle}>
-              <Ionicons name="ellipsis-horizontal" size={20} color="#fff" />
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.headerDate}>Abril 2025</Text>
+      <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
 
-          <View style={styles.totalCard}>
-            <Text style={styles.totalLabel}>Total do mês</Text>
-            <Text style={styles.totalValue}>R$ 890,00</Text>
-            <Text style={styles.totalSubtitle}>+12% vs mês anterior</Text>
-          </View>
+      <View style={styles.header}>
+        <View style={styles.headerTop}>
+          <View style={{ width: 44 }} />
+          <Text style={styles.headerTitle}>Finanças</Text>
+          <TouchableOpacity style={styles.menuButton}>
+            <Ionicons name="ellipsis-horizontal" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.headerDate}>Maio 2025</Text>
+
+        <View style={styles.totalCard}>
+          <Text style={styles.totalLabel}>Total do mês</Text>
+          <Text style={styles.totalValue}>R$ 890,00</Text>
+          <Text style={styles.totalSubtitle}>+12% vs mês anterior</Text>
         </View>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        
-        <Text style={styles.sectionTitle}>EVOLUÇÃO MENSAL</Text>
-        <View style={styles.chartCard}>
-            <View style={styles.chartRow}>
+
+        {loading ? (
+          // Skeleton state
+          <>
+            <SkeletonBox width="40%" height={12} style={{ marginBottom: 15, borderRadius: 6 }} />
+            <SkeletonBox width="100%" height={180} style={{ marginBottom: 30, borderRadius: 24 }} />
+            <SkeletonBox width="40%" height={12} style={{ marginBottom: 15, borderRadius: 6 }} />
+            <View style={{ flexDirection: 'row', gap: 15, marginBottom: 15 }}>
+              <SkeletonBox width={(width - 65) / 2} height={90} style={{ borderRadius: 20 }} />
+              <SkeletonBox width={(width - 65) / 2} height={90} style={{ borderRadius: 20 }} />
+            </View>
+          </>
+        ) : (
+          <>
+            <Text style={styles.sectionTitle}>EVOLUÇÃO MENSAL</Text>
+            <View style={styles.chartCard}>
+              <View style={styles.chartRow}>
                 <Bar height={60} label="Nov" />
                 <Bar height={75} label="Dez" />
                 <Bar height={50} label="Jan" />
                 <Bar height={85} label="Fev" />
                 <Bar height={70} label="Mar" />
-                <Bar height={100} label="Abr" active />
+                <Bar height={100} label="Mai" active />
+              </View>
             </View>
-        </View>
 
-        <Text style={styles.sectionTitle}>POR CATEGORIA</Text>
-        <View style={styles.categoriesGrid}>
-            <ProgressCard label="Alimentação" value="R$ 350" progress={0.7} color="#00A36C" />
-            <ProgressCard label="Transporte" value="R$ 160" progress={0.4} color="#00A36C" />
-        </View>
+            <Text style={styles.sectionTitle}>POR CATEGORIA</Text>
+            <View style={styles.categoriesGrid}>
+              <ProgressCard label="Alimentação" value="R$ 350" progress={0.7} color={PRIMARY_GREEN} />
+              <ProgressCard label="Transporte" value="R$ 160" progress={0.4} color={PRIMARY_GREEN} />
+            </View>
 
-        <View style={styles.fullProgressCard}>
-            <View style={styles.fullCardHeader}>
+            <View style={styles.fullProgressCard}>
+              <View style={styles.fullCardHeader}>
                 <Text style={styles.fullCardLabel}>Outros</Text>
                 <View style={styles.fullCardValueRow}>
-                    <Text style={styles.fullCardValue}>R$ 220</Text>
-                    <Text style={styles.fullCardPercent}>25%</Text>
+                  <Text style={styles.fullCardValue}>R$ 220</Text>
+                  <Text style={styles.fullCardPercent}>25%</Text>
                 </View>
-            </View>
-            <View style={styles.fullProgressBarBg}>
+              </View>
+              <View style={styles.fullProgressBarBg}>
                 <View style={[styles.fullProgressBarFill, { width: '25%' }]} />
+              </View>
             </View>
-        </View>
 
+            {/* Botão Falar com Luca */}
+            <TouchableOpacity style={styles.lucaBtn} onPress={() => router.push('/luca')}>
+              <View style={styles.lucaBtnLeft}>
+                <View style={styles.lucaIconBg}>
+                  <Ionicons name="sparkles" size={20} color={PRIMARY_GREEN} />
+                </View>
+                <View>
+                  <Text style={styles.lucaBtnTitle}>Falar com Luca</Text>
+                  <Text style={styles.lucaBtnSub}>Análise inteligente dos seus gastos</Text>
+                </View>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={PRIMARY_GREEN} />
+            </TouchableOpacity>
+          </>
+        )}
       </ScrollView>
     </View>
   );
@@ -94,15 +141,15 @@ function Bar({ height, label, active }: any) {
 }
 
 function ProgressCard({ label, value, progress, color }: any) {
-    return (
-        <View style={styles.miniCard}>
-            <Text style={styles.miniLabel}>{label}</Text>
-            <Text style={styles.miniValue}>{value}</Text>
-            <View style={styles.miniBarBg}>
-                <View style={[styles.miniBarFill, { width: `${progress * 100}%`, backgroundColor: color }]} />
-            </View>
-        </View>
-    );
+  return (
+    <View style={styles.miniCard}>
+      <Text style={styles.miniLabel}>{label}</Text>
+      <Text style={styles.miniValue}>{value}</Text>
+      <View style={styles.miniBarBg}>
+        <View style={[styles.miniBarFill, { width: `${progress * 100}%`, backgroundColor: color }]} />
+      </View>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -113,6 +160,7 @@ const styles = StyleSheet.create({
   header: {
     backgroundColor: PRIMARY_GREEN,
     paddingHorizontal: 25,
+    paddingTop: STATUS_BAR_HEIGHT,
     paddingBottom: 30,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
@@ -121,13 +169,29 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: Platform.OS === 'android' ? 10 : 0,
+    marginTop: 10,
     marginBottom: 5,
   },
   headerTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '900',
     color: '#fff',
+    flex: 1,
+    textAlign: 'center',
+  },
+  backButton: {
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+  },
+  menuButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   headerDate: {
     fontSize: 14,
@@ -136,19 +200,13 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     textAlign: 'center',
   },
-  notificationCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   totalCard: {
     backgroundColor: 'rgba(255, 255, 255, 0.12)',
     borderRadius: 24,
     padding: 20,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
   },
   totalLabel: {
     fontSize: 13,
@@ -170,7 +228,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 25,
     paddingTop: 25,
-    paddingBottom: 40,
+    paddingBottom: 120,
   },
   sectionTitle: {
     fontSize: 12,
@@ -202,7 +260,7 @@ const styles = StyleSheet.create({
     width: (width - 130) / 6,
   },
   bar: {
-    width: 25,
+    width: 24,
     borderRadius: 6,
   },
   barLabel: {
@@ -214,10 +272,11 @@ const styles = StyleSheet.create({
   categoriesGrid: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    gap: 15,
     marginBottom: 15,
   },
   miniCard: {
-    width: (width - 65) / 2,
+    flex: 1,
     backgroundColor: '#fff',
     borderRadius: 20,
     padding: 16,
@@ -252,6 +311,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderRadius: 20,
     padding: 20,
+    marginBottom: 25,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.02,
@@ -272,12 +332,12 @@ const styles = StyleSheet.create({
   fullCardValueRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
   },
   fullCardValue: {
     fontSize: 18,
     fontWeight: '900',
     color: TEXT_DARK,
-    marginRight: 10,
   },
   fullCardPercent: {
     fontSize: 14,
@@ -293,5 +353,44 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: '#A7F3D0',
     borderRadius: 4,
+  },
+  lucaBtn: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 18,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: '#D1FAE5',
+    shadowColor: PRIMARY_GREEN,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  lucaBtnLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  lucaIconBg: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#DCFCE7',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  lucaBtnTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: TEXT_DARK,
+  },
+  lucaBtnSub: {
+    fontSize: 12,
+    color: TEXT_GRAY,
+    fontWeight: '500',
+    marginTop: 2,
   },
 });

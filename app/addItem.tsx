@@ -6,7 +6,9 @@ import {
   ActivityIndicator,
   Alert,
   Dimensions,
+  Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StatusBar,
@@ -16,7 +18,8 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { CosmosProduct, fetchProductsByName } from '../scripts/cosmosService';
+import { categorizeProduct } from '../scripts/aiService';
+import { CosmosProduct, fetchFallbackImage, fetchProductsByName } from '../scripts/cosmosService';
 import { auth, db } from '../scripts/firebaseConfig';
 
 const { width, height } = Dimensions.get('window');
@@ -34,6 +37,12 @@ export default function AddItemScreen() {
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<CosmosProduct[]>([]);
   const [selectedItems, setSelectedItems] = useState<CosmosProduct[]>([]);
+  const [activeFilter, setActiveFilter] = useState('Tudo');
+  const [selectedDetailItem, setSelectedDetailItem] = useState<CosmosProduct | null>(null);
+  const [showModal, setShowModal] = useState(false);
+  const [detailImage, setDetailImage] = useState<string | null>(null);
+  const [loadingImage, setLoadingImage] = useState(false);
+  const filters = ['Tudo', 'Frutas', 'Laticínios', 'Limpeza', 'Higiene', 'Bebidas', 'Padaria', 'Carnes'];
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
   const user = auth.currentUser;
@@ -50,9 +59,27 @@ export default function AddItemScreen() {
     debounceRef.current = setTimeout(async () => {
       setSearching(true);
       try {
-        const data = await fetchProductsByName(name.trim());
-        console.log('[Cosmos] Resultados para "' + name + '":', JSON.stringify(data?.slice(0, 3)));
-        setResults(data || []);
+        const searchTerm = name.trim();
+        const data = await fetchProductsByName(searchTerm);
+
+        // Ordenação inteligente: termo exato primeiro, depois os que começam com o termo
+        const sorted = (data || []).sort((a, b) => {
+          const aDesc = a.description.toLowerCase();
+          const bDesc = b.description.toLowerCase();
+          const query = searchTerm.toLowerCase();
+
+          if (aDesc === query && bDesc !== query) return -1;
+          if (bDesc === query && aDesc !== query) return 1;
+
+          const aStarts = aDesc.startsWith(query);
+          const bStarts = bDesc.startsWith(query);
+          if (aStarts && !bStarts) return -1;
+          if (bStarts && !aStarts) return 1;
+
+          return 0;
+        });
+
+        setResults(sorted);
       } catch (error) {
         console.error('[Cosmos] Erro:', error);
         setResults([]);
@@ -84,7 +111,6 @@ export default function AddItemScreen() {
 
     try {
       if (selectedItems.length > 0) {
-        // Salva todos os itens selecionados
         for (const item of selectedItems) {
           const itemToAdd = {
             name: item.description,
@@ -93,19 +119,22 @@ export default function AddItemScreen() {
             thumbnail: item.thumbnail || ''
           };
 
+          const category = await categorizeProduct(item.description);
+
           await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
             ...itemToAdd,
             checked: false,
-            category: 'Outros',
+            category: category,
             createdAt: serverTimestamp(),
           });
         }
       } else {
-        // Se nenhum item foi selecionado, salva o texto digitado
         if (!name.trim()) {
           Alert.alert('Aviso', 'Digite o nome do produto ou selecione na lista.');
           return;
         }
+
+        const category = await categorizeProduct(name);
 
         await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
           name: name,
@@ -113,12 +142,13 @@ export default function AddItemScreen() {
           brand: '',
           thumbnail: '',
           checked: false,
-          category: 'Outros',
+          category: category,
           createdAt: serverTimestamp(),
         });
       }
       router.back();
     } catch (error) {
+      console.error(error);
       Alert.alert('Erro', 'Não foi possível salvar os itens.');
     }
   };
@@ -143,6 +173,7 @@ export default function AddItemScreen() {
         <View style={styles.inputWrapper}>
           <Ionicons name="cart-outline" size={20} color="#94A3B8" style={styles.inputIcon} />
           <TextInput
+            style={styles.input}
             placeholder="Nome do produto"
             value={name}
             onChangeText={setName}
@@ -154,6 +185,21 @@ export default function AddItemScreen() {
             <ActivityIndicator size="small" color={PRIMARY_GREEN} style={{ marginLeft: 8 }} />
           )}
         </View>
+      </View>
+
+      {/* Filtros */}
+      <View style={styles.filtersWrapper}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filtersScroll}>
+          {filters.map(filter => (
+            <TouchableOpacity
+              key={filter}
+              style={[styles.filterChip, activeFilter === filter && styles.filterChipActive]}
+              onPress={() => setActiveFilter(filter)}
+            >
+              <Text style={[styles.filterText, activeFilter === filter && styles.filterTextActive]}>{filter}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
       </View>
 
       <ScrollView
@@ -173,30 +219,69 @@ export default function AddItemScreen() {
         {!searching && results.length > 0 && (
           <View style={styles.resultsContainer}>
             <Text style={styles.resultsTitle}>RESULTADOS ENCONTRADOS</Text>
-            {results.map((item, index) => {
-              const isSelected = selectedItems.some(i => i.gtin === item.gtin);
-              return (
-                <TouchableOpacity
-                  key={index}
-                  style={[styles.resultItem, isSelected && styles.resultItemActive]}
-                  onPress={() => toggleSelection(item)}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.resultLeft}>
-                    <View style={[styles.statusDot, { backgroundColor: isSelected ? PRIMARY_GREEN : '#E2E8F0' }]} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.resultBrand}>{item.brand?.name || 'Marca n/i'}</Text>
-                      <Text style={styles.resultName} numberOfLines={2}>{item.description}</Text>
+            {results
+              .filter(item => {
+                if (activeFilter === 'Tudo') return true;
+                const desc = item.description.toLowerCase();
+                const filter = activeFilter.toLowerCase();
+
+                const filterKeywords: { [key: string]: string[] } = {
+                  'frutas': ['fruta', 'banana', 'maçã', 'uva', 'morango', 'laranja', 'limão', 'abacaxi', 'mamão', 'melancia'],
+                  'laticínios': ['leite', 'queijo', 'iogurte', 'manteiga', 'creme', 'requeijão', 'danone', 'coalhada'],
+                  'limpeza': ['detergente', 'sabão', 'amaciante', 'limpador', 'desinfetante', 'esponja', 'cloro', 'água sanitária'],
+                  'higiene': ['shampoo', 'sabonete', 'pasta', 'escova', 'desodorante', 'papel', 'absorvente', 'fio dental'],
+                  'bebidas': ['água', 'suco', 'refrigerante', 'cerveja', 'vinho', 'café', 'chá', 'energético', 'vodka'],
+                  'padaria': ['pão', 'bolo', 'biscoito', 'bolacha', 'rosca', 'baguete', 'croissant'],
+                  'carnes': ['carne', 'frango', 'peixe', 'linguiça', 'presunto', 'salame', 'bife', 'costela'],
+                };
+
+                return filterKeywords[filter]?.some(kw => desc.includes(kw)) ?? true;
+              })
+              .map((item, index) => {
+                const isSelected = selectedItems.some(i => i.gtin === item.gtin);
+                return (
+                  <TouchableOpacity
+                    key={index}
+                    style={[styles.resultItem, isSelected && styles.resultItemActive]}
+                    onPress={() => toggleSelection(item)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.resultLeft}>
+                      <View style={[styles.statusDot, { backgroundColor: isSelected ? PRIMARY_GREEN : '#E2E8F0' }]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.resultBrand}>{item.brand?.name || 'Marca n/i'}</Text>
+                        <Text style={styles.resultName} numberOfLines={2}>{item.description}</Text>
+                        <TouchableOpacity
+                          onPress={async (e) => {
+                            e.stopPropagation();
+                            setSelectedDetailItem(item);
+                            setShowModal(true);
+                            // Resolve imagem: Cosmos primeiro, depois Open Food Facts
+                            setDetailImage(null);
+                            if (item.thumbnail) {
+                              setDetailImage(item.thumbnail);
+                            } else {
+                              setLoadingImage(true);
+                              const fallback = await fetchFallbackImage(item.gtin);
+                              setDetailImage(fallback);
+                              setLoadingImage(false);
+                            }
+                          }}
+                          style={styles.detailsBtn}
+                        >
+                          <Text style={styles.detailsBtnText}>Ver Detalhes</Text>
+                        </TouchableOpacity>
+                      </View>
                     </View>
-                  </View>
-                  <Text style={styles.resultPrice}>
-                    {item.avg_price ? `R$ ${item.avg_price.toFixed(2)}` : '--'}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+                    <Text style={styles.resultPrice}>
+                      {item.avg_price ? `R$ ${item.avg_price.toFixed(2)}` : '--'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
           </View>
         )}
+
 
         {/* Nenhum resultado */}
         {!searching && name.trim().length >= 3 && results.length === 0 && (
@@ -221,6 +306,94 @@ export default function AddItemScreen() {
         </TouchableOpacity>
 
       </ScrollView>
+
+      {/* Details Modal */}
+      <Modal
+        visible={showModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <TouchableOpacity
+              style={styles.closeBtn}
+              onPress={() => setShowModal(false)}
+            >
+              <Ionicons name="close" size={24} color={TEXT_DARK} />
+            </TouchableOpacity>
+
+            {selectedDetailItem && (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <View style={styles.detailImageWrapper}>
+                  {loadingImage ? (
+                    <ActivityIndicator size="large" color={PRIMARY_GREEN} />
+                  ) : detailImage ? (
+                    <Image
+                      source={{ uri: detailImage }}
+                      style={styles.detailImage}
+                      resizeMode="contain"
+                    />
+                  ) : (
+                    <View style={styles.noImage}>
+                      <Ionicons name="image-outline" size={60} color="#E2E8F0" />
+                      <Text style={{ color: '#CBD5E1', fontSize: 12, marginTop: 8, fontWeight: '600' }}>
+                        Sem imagem disponível
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                <View style={styles.detailInfo}>
+                  <Text style={styles.detailBrand}>{selectedDetailItem.brand?.name || 'Marca não informada'}</Text>
+                  <Text style={styles.detailName}>{selectedDetailItem.description}</Text>
+
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoBox}>
+                      <Text style={styles.infoLabel}>GTIN / EAN</Text>
+                      <Text style={styles.infoValue}>{selectedDetailItem.gtin}</Text>
+                    </View>
+                    <View style={styles.infoBox}>
+                      <Text style={styles.infoLabel}>Preço Médio</Text>
+                      <Text style={[styles.infoValue, { color: PRIMARY_GREEN }]}>
+                        {selectedDetailItem.avg_price ? `R$ ${selectedDetailItem.avg_price.toFixed(2)}` : 'N/A'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.detailSection}>
+                    <Text style={styles.sectionLabel}>Categoria GPC</Text>
+                    <Text style={styles.sectionValue}>
+                      {selectedDetailItem.gpc?.description || 'Não categorizado'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.detailSection}>
+                    <Text style={styles.sectionLabel}>NCM</Text>
+                    <Text style={styles.sectionValue}>
+                      {selectedDetailItem.ncm?.code} - {selectedDetailItem.ncm?.description}
+                    </Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.modalAddBtn}
+                  onPress={() => {
+                    toggleSelection(selectedDetailItem);
+                    setShowModal(false);
+                  }}
+                >
+                  <Text style={styles.modalAddBtnText}>
+                    {selectedItems.some(i => i.gtin === selectedDetailItem.gtin)
+                      ? 'Remover da seleção'
+                      : 'Selecionar este produto'}
+                  </Text>
+                </TouchableOpacity>
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -235,9 +408,7 @@ const styles = StyleSheet.create({
     backgroundColor: PRIMARY_GREEN,
     paddingHorizontal: 20,
     paddingTop: STATUS_BAR_HEIGHT,
-    paddingBottom: 24,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
+    paddingBottom: 20,
   },
   headerTop: {
     flexDirection: 'row',
@@ -271,11 +442,47 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 16,
     color: TEXT_DARK,
-    fontWeight: '500',
+    fontWeight: '600',
     height: '100%',
+    borderWidth: 0,
+    backgroundColor: 'transparent',
     ...Platform.select({
-      web: { outlineStyle: 'none' },
+      web: {
+        outlineStyle: 'none',
+        boxShadow: 'none',
+      } as any,
     }),
+  },
+  filtersWrapper: {
+    backgroundColor: PRIMARY_GREEN,
+    paddingBottom: 25,
+    marginTop: -2,
+    borderBottomLeftRadius: 32,
+    borderBottomRightRadius: 32,
+  },
+  filtersScroll: {
+    paddingHorizontal: 20,
+    gap: 10,
+  },
+  filterChip: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  filterChipActive: {
+    backgroundColor: '#fff',
+    borderColor: '#fff',
+  },
+  filterText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: 'rgba(255, 255, 255, 0.9)',
+  },
+  filterTextActive: {
+    color: PRIMARY_GREEN,
   },
   scrollContent: {
     paddingHorizontal: 20,
@@ -374,6 +581,130 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   addButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  detailsBtn: {
+    marginTop: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  detailsBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: TEXT_GRAY,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    padding: 25,
+    maxHeight: '85%',
+  },
+  closeBtn: {
+    alignSelf: 'flex-end',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F8FAFC',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  detailImageWrapper: {
+    width: '100%',
+    height: 200,
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
+  },
+  detailImage: {
+    width: '80%',
+    height: '80%',
+  },
+  noImage: {
+    alignItems: 'center',
+  },
+  detailInfo: {
+    marginBottom: 25,
+  },
+  detailBrand: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: PRIMARY_GREEN,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  detailName: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    marginBottom: 20,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 20,
+  },
+  infoBox: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
+  },
+  infoLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: TEXT_GRAY,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  infoValue: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: TEXT_DARK,
+  },
+  detailSection: {
+    marginBottom: 15,
+  },
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: TEXT_GRAY,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  sectionValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: TEXT_DARK,
+    lineHeight: 20,
+  },
+  modalAddBtn: {
+    backgroundColor: PRIMARY_GREEN,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 10,
+    marginBottom: 20,
+  },
+  modalAddBtnText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '800',

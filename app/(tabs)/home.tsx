@@ -3,6 +3,7 @@ import { useRouter } from 'expo-router';
 import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import {
+  Animated,
   Dimensions,
   Platform,
   RefreshControl,
@@ -13,17 +14,57 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import Animated, { FadeInUp } from 'react-native-reanimated';
 import { auth, db } from '../../scripts/firebaseConfig';
 
 const { width } = Dimensions.get('window');
 const STATUS_BAR_HEIGHT = Platform.OS === 'android'
   ? (StatusBar.currentHeight ?? 24)
-  : 44;
+  : 54; // Aumentado para cobrir Dynamic Island e notch iPhone
 const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
+
+function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
+  const opacity = React.useRef(new Animated.Value(0.4)).current;
+  React.useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+  return (
+    <Animated.View
+      style={[
+        { width: w, height: h, backgroundColor: '#E2E8F0', borderRadius: 10, opacity },
+        style,
+      ]}
+    />
+  );
+}
+
+function SkeletonListItem() {
+  return (
+    <View style={skStyles.row}>
+      <SkeletonBox width={12} height={12} style={{ borderRadius: 6, marginRight: 14 }} />
+      <SkeletonBox width="55%" height={14} />
+      <SkeletonBox width={50} height={14} style={{ marginLeft: 'auto' }} />
+    </View>
+  );
+}
+
+const skStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 10,
+  },
+});
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -44,27 +85,11 @@ export default function HomeScreen() {
 
   const onRefresh = React.useCallback(() => {
     setRefreshing(true);
-    // Como o Firebase já é real-time via onSnapshot, o refresh manual apenas
-    // simula o feedback visual de atualização que o usuário espera.
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 1500);
+    setTimeout(() => setRefreshing(false), 1500);
   }, []);
-
-  const addProduct = (productName: string) => {
-    if (productName.trim() === '') return;
-
-    const newProduct = {
-      id: Math.random().toString(),
-      name: productName,
-    };
-
-    setWeeklyList([...weeklyList, newProduct]);
-  };
 
   useEffect(() => {
     if (!user) return;
-
 
     const unsubStats = onSnapshot(doc(db, 'dashboards', user.uid), (snapshot) => {
       if (snapshot.exists()) {
@@ -110,12 +135,13 @@ export default function HomeScreen() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onRefresh}
-            tintColor={PRIMARY_GREEN} // Cor do spinner (mais visível se descer para a área branca ou com fundo)
+            tintColor={PRIMARY_GREEN}
             colors={[PRIMARY_GREEN]}
-            progressViewOffset={STATUS_BAR_HEIGHT + 60} // Desce mais o loader
+            progressViewOffset={STATUS_BAR_HEIGHT + 70}
           />
         }
       >
+        {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerTop}>
             <View>
@@ -128,24 +154,22 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
 
-          <Animated.View entering={FadeInUp.delay(200)} style={styles.mainCard}>
+          <View style={styles.mainCard}>
             <Text style={styles.mainCardLabel}>Gastos do mês</Text>
             <Text style={styles.mainCardAmount}>R$ {stats.totalSpent}</Text>
             <Text style={styles.mainCardSubtitle}>{stats.percentChange} em relação ao mês passado</Text>
-          </Animated.View>
+          </View>
         </View>
 
         <View style={styles.mainContent}>
-
-
-          {/* Categories Row */}
+          {/* Categories */}
           <View style={styles.categoriesRow}>
             {stats.categories.map((cat: any) => (
               <CategoryCard key={cat.id} icon={cat.icon} label={cat.label} value={cat.value} />
             ))}
           </View>
 
-          {/* Weekly List Section */}
+          {/* Weekly List */}
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>LISTA DA SEMANA</Text>
             <TouchableOpacity onPress={() => router.push('/lists')}>
@@ -154,7 +178,13 @@ export default function HomeScreen() {
           </View>
 
           <View style={styles.listContainer}>
-            {weeklyList.length > 0 ? (
+            {loading ? (
+              <>
+                <SkeletonListItem />
+                <SkeletonListItem />
+                <SkeletonListItem />
+              </>
+            ) : weeklyList.length > 0 ? (
               weeklyList.map((item: any) => (
                 <ListItem key={item.id} name={item.name} price={item.price} color={item.color || '#CBD5E1'} />
               ))
@@ -166,16 +196,21 @@ export default function HomeScreen() {
             )}
           </View>
 
+          {/* Falar com Luca */}
+          <TouchableOpacity style={styles.lucaBtn} onPress={() => router.push('/luca')}>
+            <View style={styles.lucaBtnLeft}>
+              <View style={styles.lucaIconBg}>
+                <Ionicons name="sparkles" size={20} color={PRIMARY_GREEN} />
+              </View>
+              <View>
+                <Text style={styles.lucaBtnTitle}>Falar com Luca</Text>
+                <Text style={styles.lucaBtnSub}>Insights e dicas com IA</Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={PRIMARY_GREEN} />
+          </TouchableOpacity>
         </View>
-
       </ScrollView>
-
-      <TouchableOpacity
-        style={styles.fab}
-        onPress={() => router.push('/addItem')}
-      >
-        <Ionicons name="add" size={32} color="#fff" />
-      </TouchableOpacity>
     </View>
   );
 }
@@ -184,7 +219,7 @@ function CategoryCard({ icon, label, value }: any) {
   return (
     <View style={styles.catCard}>
       <View style={styles.catIconWrapper}>
-        <Ionicons name={icon} size={24} color={TEXT_GRAY} />
+        <Ionicons name={icon} size={22} color={TEXT_GRAY} />
       </View>
       <Text style={styles.catLabel}>{label}</Text>
       <Text style={styles.catValue}>{value}</Text>
@@ -210,7 +245,7 @@ const styles = StyleSheet.create({
     backgroundColor: BG_LIGHT,
   },
   scrollContent: {
-    paddingBottom: 120,
+    paddingBottom: 130,
     backgroundColor: BG_LIGHT,
   },
   header: {
@@ -238,9 +273,9 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   notificationCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
@@ -281,7 +316,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   mainContent: {
-    paddingHorizontal: 25,
+    paddingHorizontal: 20,
     paddingTop: 25,
   },
   categoriesRow: {
@@ -290,7 +325,7 @@ const styles = StyleSheet.create({
     marginBottom: 30,
   },
   catCard: {
-    width: (width - 70) / 3,
+    width: (width - 60) / 3,
     backgroundColor: '#fff',
     borderRadius: 20,
     padding: 12,
@@ -309,13 +344,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   catLabel: {
-    fontSize: 11,
+    fontSize: 10,
     color: TEXT_GRAY,
     fontWeight: '600',
     marginBottom: 4,
+    textAlign: 'center',
   },
   catValue: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
     color: TEXT_DARK,
   },
@@ -337,7 +373,8 @@ const styles = StyleSheet.create({
     color: PRIMARY_GREEN,
   },
   listContainer: {
-    gap: 12,
+    gap: 10,
+    marginBottom: 25,
   },
   listItem: {
     backgroundColor: '#fff',
@@ -355,11 +392,12 @@ const styles = StyleSheet.create({
   listItemLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
   },
   statusDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
     marginRight: 12,
   },
   itemName: {
@@ -371,31 +409,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
     color: TEXT_GRAY,
-  },
-  fab: {
-    position: 'absolute',
-    bottom: 110,
-    right: 25,
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: PRIMARY_GREEN,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.4,
-    shadowRadius: 15,
-    elevation: 8,
-  },
-  loadingBox: {
-    padding: 20,
-    alignItems: 'center',
-  },
-  loadingText: {
-    color: TEXT_GRAY,
-    fontSize: 14,
-    fontWeight: '600',
   },
   emptyBox: {
     backgroundColor: '#fff',
@@ -413,5 +426,44 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 10,
     textAlign: 'center',
+  },
+  lucaBtn: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 18,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: '#D1FAE5',
+    shadowColor: PRIMARY_GREEN,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  lucaBtnLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  lucaIconBg: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#DCFCE7',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  lucaBtnTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: TEXT_DARK,
+  },
+  lucaBtnSub: {
+    fontSize: 12,
+    color: TEXT_GRAY,
+    fontWeight: '500',
+    marginTop: 2,
   },
 });
