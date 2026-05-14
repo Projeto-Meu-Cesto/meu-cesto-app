@@ -12,7 +12,6 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import Animated, {
@@ -23,7 +22,7 @@ import Animated, {
   withTiming
 } from 'react-native-reanimated';
 import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { auth } from '../scripts/firebaseConfig';
+import { auth, isFirebaseConfigured } from '../scripts/firebaseConfig';
 import { useToast } from '../context/ToastContext';
 
 const PRIMARY_GREEN = '#00C853';
@@ -47,7 +46,7 @@ const AnimatedInput = ({
 
   useEffect(() => {
     focusAnim.value = withTiming(isFocused ? 1 : 0, { duration: 300 });
-  }, [isFocused]);
+  }, [focusAnim, isFocused]);
 
   const animatedWrapperStyle = useAnimatedStyle(() => {
     return {
@@ -134,6 +133,11 @@ export default function RegisterScreen() {
 
     if (password !== confirmPassword) {
       showToast('As senhas não coincidem', 'error');
+      return;
+    }
+
+    if (!isFirebaseConfigured) {
+      showToast('Firebase não configurado neste ambiente.', 'error');
       return;
     }
 
@@ -226,9 +230,9 @@ export default function RegisterScreen() {
             <Pressable
               onPress={handleRegister}
               disabled={loading}
-              style={({ pressed, hovered }) => [
+              style={({ pressed }) => [
                 styles.button,
-                (pressed || hovered || (isFormValid && !loading)) ? styles.buttonActive : styles.buttonInactive,
+                (pressed || (isFormValid && !loading)) ? styles.buttonActive : styles.buttonInactive,
                 { transform: [{ scale: (pressed && !loading) ? 0.96 : 1 }] }
               ]}
             >

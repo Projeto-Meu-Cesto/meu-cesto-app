@@ -86,6 +86,21 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="luca-tab"
+        options={{
+          tabBarLabel: 'Luca',
+          tabBarIcon: ({ color, focused }) => (
+            <View style={[styles.iconWrapper, focused && styles.activeIconBg]}>
+              <Ionicons
+                name={focused ? 'sparkles' : 'sparkles-outline'}
+                size={isSmallScreen ? 20 : 22}
+                color={color}
+              />
+            </View>
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="profile"
         options={{
           tabBarLabel: 'Perfil',

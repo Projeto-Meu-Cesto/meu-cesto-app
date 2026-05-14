@@ -1,11 +1,13 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
-import React, { useEffect, useState } from 'react';
+import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Animated,
   Dimensions,
+  Modal,
   Platform,
+  Pressable,
   RefreshControl,
   ScrollView,
   StatusBar,
@@ -15,6 +17,7 @@ import {
   View,
 } from 'react-native';
 import { auth, db } from '../../scripts/firebaseConfig';
+import { getCachedPurchases, mergePurchaseRecords, type PurchaseRecord } from '../../scripts/financeContext';
 
 const { width } = Dimensions.get('window');
 const STATUS_BAR_HEIGHT = Platform.OS === 'android'
@@ -24,6 +27,141 @@ const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
+const WARNING = '#F59E0B';
+const HOME_LOAD_TIMEOUT_MS = 4500;
+
+type ShoppingListItem = {
+  id: string;
+  name?: string;
+  price?: string | number;
+  quantity?: string | number;
+  color?: string;
+  checked?: boolean;
+  category?: string;
+  createdAt?: any;
+  checkedAt?: any;
+};
+
+type HomeNotification = {
+  id: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  title: string;
+  description: string;
+  color: string;
+  actionLabel?: string;
+  action?: () => void;
+};
+
+type ListSummary = {
+  total: number;
+  checked: number;
+  pending: number;
+  estimated: number;
+  spent: number;
+  confirmed: number;
+};
+
+function parseMoney(value: string | number | undefined) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (!value) return 0;
+
+  const normalized = value
+    .replace(/[^\d,.-]/g, '')
+    .replace(/\.(?=\d{3}(\D|$))/g, '')
+    .replace(',', '.');
+
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getQuantity(value: string | number | undefined) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? value : 1;
+  }
+
+  const parsed = Number.parseInt(String(value || '1'), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function getItemTotal(item: Pick<ShoppingListItem, 'price' | 'quantity'>) {
+  return parseMoney(item.price) * getQuantity(item.quantity);
+}
+
+function getPurchaseItemTotal(item: NonNullable<PurchaseRecord['items']>[number]) {
+  if (typeof item.total === 'number' && Number.isFinite(item.total)) {
+    return item.total;
+  }
+
+  return parseMoney(item.price) * getQuantity(item.quantity);
+}
+
+function toDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === 'function') return value.toDate();
+  if (typeof value.seconds === 'number') return new Date(value.seconds * 1000);
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function toMonthKey(date: Date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${date.getFullYear()}-${month}`;
+}
+
+function buildListSummary(items: ShoppingListItem[], purchases: PurchaseRecord[]): ListSummary {
+  const currentMonthKey = toMonthKey(new Date());
+  const checkedItems = items.filter(item => item.checked);
+  const purchasedSourceIds = new Set<string>();
+  let spent = 0;
+  let confirmed = 0;
+
+  purchases.forEach((purchase) => {
+    const purchaseDate = toDate(purchase.finalizedAt) || toDate(purchase.createdAt) || new Date();
+    if (toMonthKey(purchaseDate) !== currentMonthKey) return;
+
+    (purchase.items || []).forEach((item) => {
+      const amount = getPurchaseItemTotal(item);
+      if (amount <= 0) return;
+
+      if (item.sourceItemId) {
+        purchasedSourceIds.add(item.sourceItemId);
+      }
+
+      spent += amount;
+      confirmed += 1;
+    });
+  });
+
+  checkedItems.forEach((item) => {
+    if (purchasedSourceIds.has(item.id)) return;
+
+    const amount = getItemTotal(item);
+    if (amount <= 0) return;
+
+    spent += amount;
+    confirmed += 1;
+  });
+
+  const estimated = items.reduce((acc, item) => acc + getItemTotal(item), 0);
+
+  return {
+    total: items.length,
+    checked: checkedItems.length,
+    pending: items.length - checkedItems.length,
+    estimated,
+    spent,
+    confirmed,
+  };
+}
+
+function formatCurrency(value: number) {
+  return value.toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  });
+}
 
 function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
   const opacity = React.useRef(new Animated.Value(0.4)).current;
@@ -34,7 +172,7 @@ function SkeletonBox({ width: w, height: h, style }: { width?: any; height: numb
         Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
       ])
     ).start();
-  }, []);
+  }, [opacity]);
   return (
     <Animated.View
       style={[
@@ -69,17 +207,17 @@ const skStyles = StyleSheet.create({
 export default function HomeScreen() {
   const router = useRouter();
   const user = auth.currentUser;
-  const [stats, setStats] = useState({
-    totalSpent: '0,00',
-    percentChange: '+0%',
-    categories: [
-      { id: '1', label: 'Alimentação', value: 'R$ 0', icon: 'cart' },
-      { id: '2', label: 'Transporte', value: 'R$ 0', icon: 'bus' },
-      { id: '3', label: 'Outros', value: 'R$ 0', icon: 'cube' },
-    ]
+  const [weeklyList, setWeeklyList] = useState<ShoppingListItem[]>([]);
+  const [listSummary, setListSummary] = useState<ListSummary>({
+    total: 0,
+    checked: 0,
+    pending: 0,
+    estimated: 0,
+    spent: 0,
+    confirmed: 0,
   });
-
-  const [weeklyList, setWeeklyList] = useState<any[]>([]);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notificationsSeen, setNotificationsSeen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -89,40 +227,167 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setLoading(false);
+      return;
+    }
 
-    const unsubStats = onSnapshot(doc(db, 'dashboards', user.uid), (snapshot) => {
-      if (snapshot.exists()) {
-        const data = snapshot.data();
-        setStats(prev => ({
-          ...prev,
-          totalSpent: data.totalSpent || '0,00',
-          percentChange: data.percentChange || '+0%',
-          categories: data.categories || prev.categories,
-        }));
-      }
-    });
+    let active = true;
+    let shoppingItems: ShoppingListItem[] = [];
+    let firestorePurchases: PurchaseRecord[] = [];
+    let cachedPurchases: PurchaseRecord[] = [];
 
-    const q = query(
+    const publishSummary = () => {
+      if (!active) return;
+
+      const purchases = mergePurchaseRecords(firestorePurchases, cachedPurchases);
+      setWeeklyList(shoppingItems.slice(0, 4));
+      setListSummary(buildListSummary(shoppingItems, purchases));
+      setLoading(false);
+    };
+
+    getCachedPurchases(user.uid)
+      .then((purchases) => {
+        cachedPurchases = purchases;
+        if (purchases.length > 0) {
+          publishSummary();
+        }
+      })
+      .catch((error) => {
+        console.warn('Nao foi possivel carregar compras finalizadas em cache.', error);
+      });
+
+    const shoppingQuery = query(
       collection(db, 'users', user.uid, 'shopping_list'),
-      orderBy('createdAt', 'desc'),
-      limit(4)
+      orderBy('createdAt', 'desc')
+    );
+    const purchasesQuery = query(
+      collection(db, 'users', user.uid, 'purchases'),
+      orderBy('finalizedAt', 'desc'),
+      limit(120)
+    );
+    let receivedSnapshot = false;
+    const loadingTimer = setTimeout(() => {
+      if (!receivedSnapshot && active) {
+        publishSummary();
+      }
+    }, HOME_LOAD_TIMEOUT_MS);
+
+    const unsubList = onSnapshot(
+      shoppingQuery,
+      (snapshot) => {
+        receivedSnapshot = true;
+        clearTimeout(loadingTimer);
+
+        shoppingItems = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        })) as ShoppingListItem[];
+
+        publishSummary();
+      },
+      (error) => {
+        console.error('Erro ao carregar resumo da lista:', error);
+        receivedSnapshot = true;
+        clearTimeout(loadingTimer);
+        publishSummary();
+      }
     );
 
-    const unsubList = onSnapshot(q, (snapshot) => {
-      const items: any[] = [];
-      snapshot.forEach((doc) => {
-        items.push({ id: doc.id, ...doc.data() });
-      });
-      setWeeklyList(items);
-      setLoading(false);
-    });
+    const unsubPurchases = onSnapshot(
+      purchasesQuery,
+      (snapshot) => {
+        firestorePurchases = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        })) as PurchaseRecord[];
+
+        publishSummary();
+      },
+      (error) => {
+        console.error('Erro ao carregar compras finalizadas:', error);
+        publishSummary();
+      }
+    );
 
     return () => {
-      unsubStats();
+      active = false;
+      clearTimeout(loadingTimer);
       unsubList();
+      unsubPurchases();
     };
   }, [user]);
+
+  const notifications = useMemo<HomeNotification[]>(() => {
+    const totalSpent = listSummary.spent;
+    const messages: HomeNotification[] = [
+      {
+        id: 'month-total',
+        icon: 'wallet-outline',
+        title: 'Gastos confirmados',
+        description: totalSpent > 0
+          ? `Você marcou ${formatCurrency(totalSpent)} como comprado.`
+          : 'Nenhum item foi marcado como comprado ainda.',
+        color: PRIMARY_GREEN,
+        actionLabel: 'Ver finanças',
+        action: () => router.push('/stats'),
+      },
+      {
+        id: 'shopping-list',
+        icon: listSummary.pending > 0 ? 'cart-outline' : 'checkmark-circle-outline',
+        title: listSummary.pending > 0 ? 'Itens pendentes' : 'Lista em dia',
+        description: listSummary.total > 0
+          ? `${listSummary.pending} pendente(s), ${listSummary.checked} no carrinho. Estimativa: ${formatCurrency(listSummary.estimated)}.`
+          : 'Sua lista ainda está vazia. Adicione itens para acompanhar melhor seus gastos.',
+        color: listSummary.pending > 0 ? WARNING : PRIMARY_GREEN,
+        actionLabel: listSummary.total > 0 ? 'Abrir lista' : 'Adicionar item',
+        action: () => router.push(listSummary.total > 0 ? '/lists' : '/addItem'),
+      },
+      {
+        id: 'luca',
+        icon: 'sparkles-outline',
+        title: 'Luca pronto para ajudar',
+        description: 'Peça dicas de economia com base nos seus itens e gastos reais.',
+        color: '#38BDF8',
+        actionLabel: 'Falar com Luca',
+        action: () => router.push('/luca-tab' as any),
+      },
+    ];
+
+    if (listSummary.pending >= 5) {
+      messages.unshift({
+        id: 'many-pending',
+        icon: 'alert-circle-outline',
+        title: 'Lista ficando grande',
+        description: `Você tem ${listSummary.pending} itens pendentes. Vale revisar antes de ir ao mercado.`,
+        color: '#EF4444',
+        actionLabel: 'Revisar agora',
+        action: () => router.push('/lists'),
+      });
+    }
+
+    return messages;
+  }, [listSummary, router]);
+
+  const quickCards = useMemo(() => [
+    { id: 'pending', label: 'Pendentes', value: String(listSummary.pending), icon: 'cart-outline' },
+    { id: 'checked', label: 'No carrinho', value: String(listSummary.checked), icon: 'checkmark-circle-outline' },
+    { id: 'estimated', label: 'Estimado', value: formatCurrency(listSummary.estimated), icon: 'calculator-outline' },
+  ], [listSummary]);
+
+  const openNotifications = () => {
+    setNotificationsOpen(true);
+    setNotificationsSeen(true);
+  };
+
+  const closeNotifications = () => {
+    setNotificationsOpen(false);
+  };
+
+  const handleNotificationAction = (notification: HomeNotification) => {
+    setNotificationsOpen(false);
+    notification.action?.();
+  };
 
   return (
     <View style={styles.container}>
@@ -148,23 +413,31 @@ export default function HomeScreen() {
               <Text style={styles.greeting}>Bom dia,</Text>
               <Text style={styles.userName}>{user?.displayName || 'Usuário'}</Text>
             </View>
-            <TouchableOpacity style={styles.notificationCircle}>
+            <TouchableOpacity
+              style={styles.notificationCircle}
+              onPress={openNotifications}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Abrir notificações"
+            >
               <Ionicons name="notifications" size={20} color="#fff" />
-              <View style={styles.activeDot} />
+              {!notificationsSeen && <View style={styles.activeDot} />}
             </TouchableOpacity>
           </View>
 
           <View style={styles.mainCard}>
-            <Text style={styles.mainCardLabel}>Gastos do mês</Text>
-            <Text style={styles.mainCardAmount}>R$ {stats.totalSpent}</Text>
-            <Text style={styles.mainCardSubtitle}>{stats.percentChange} em relação ao mês passado</Text>
+            <Text style={styles.mainCardLabel}>Gasto confirmado</Text>
+            <Text style={styles.mainCardAmount}>{formatCurrency(listSummary.spent)}</Text>
+            <Text style={styles.mainCardSubtitle}>
+              {listSummary.confirmed} item(ns) confirmados neste mes
+            </Text>
           </View>
         </View>
 
         <View style={styles.mainContent}>
           {/* Categories */}
           <View style={styles.categoriesRow}>
-            {stats.categories.map((cat: any) => (
+            {quickCards.map((cat) => (
               <CategoryCard key={cat.id} icon={cat.icon} label={cat.label} value={cat.value} />
             ))}
           </View>
@@ -186,7 +459,13 @@ export default function HomeScreen() {
               </>
             ) : weeklyList.length > 0 ? (
               weeklyList.map((item: any) => (
-                <ListItem key={item.id} name={item.name} price={item.price} color={item.color || '#CBD5E1'} />
+                <ListItem
+                  key={item.id}
+                  name={item.name}
+                  price={item.price}
+                  quantity={item.quantity}
+                  color={item.color || '#CBD5E1'}
+                />
               ))
             ) : (
               <View style={styles.emptyBox}>
@@ -197,7 +476,7 @@ export default function HomeScreen() {
           </View>
 
           {/* Falar com Luca */}
-          <TouchableOpacity style={styles.lucaBtn} onPress={() => router.push('/luca')}>
+          <TouchableOpacity style={styles.lucaBtn} onPress={() => router.push('/luca-tab' as any)}>
             <View style={styles.lucaBtnLeft}>
               <View style={styles.lucaIconBg}>
                 <Ionicons name="sparkles" size={20} color={PRIMARY_GREEN} />
@@ -211,6 +490,46 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
       </ScrollView>
+
+      <Modal visible={notificationsOpen} transparent animationType="fade" onRequestClose={closeNotifications}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={styles.modalBackdrop} onPress={closeNotifications} />
+          <View style={styles.notificationPanel}>
+            <View style={styles.notificationHeader}>
+              <View>
+                <Text style={styles.notificationTitle}>Notificações</Text>
+                <Text style={styles.notificationSubtitle}>Resumo rápido do seu cesto</Text>
+              </View>
+              <TouchableOpacity style={styles.closeButton} onPress={closeNotifications}>
+                <Ionicons name="close" size={22} color={TEXT_DARK} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.notificationList}>
+              {notifications.map(notification => (
+                <View key={notification.id} style={styles.notificationItem}>
+                  <View style={[styles.notificationIcon, { backgroundColor: `${notification.color}18` }]}>
+                    <Ionicons name={notification.icon} size={20} color={notification.color} />
+                  </View>
+                  <View style={styles.notificationBody}>
+                    <Text style={styles.notificationItemTitle}>{notification.title}</Text>
+                    <Text style={styles.notificationDescription}>{notification.description}</Text>
+                    {notification.actionLabel && (
+                      <TouchableOpacity
+                        style={styles.notificationAction}
+                        onPress={() => handleNotificationAction(notification)}
+                      >
+                        <Text style={styles.notificationActionText}>{notification.actionLabel}</Text>
+                        <Ionicons name="chevron-forward" size={16} color={PRIMARY_GREEN} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -227,14 +546,27 @@ function CategoryCard({ icon, label, value }: any) {
   );
 }
 
-function ListItem({ name, price, color }: any) {
+function ListItem({
+  name,
+  price,
+  quantity,
+  color = '#CBD5E1',
+}: Pick<ShoppingListItem, 'name' | 'price' | 'quantity' | 'color'>) {
+  const amount = getItemTotal({ price, quantity });
+  const quantityValue = getQuantity(quantity);
+
   return (
     <View style={styles.listItem}>
       <View style={styles.listItemLeft}>
         <View style={[styles.statusDot, { backgroundColor: color }]} />
-        <Text style={styles.itemName}>{name}</Text>
+        <View style={styles.listItemText}>
+          <Text style={styles.itemName}>{name || 'Item'}</Text>
+          {quantityValue > 1 ? (
+            <Text style={styles.itemMeta}>{quantityValue} un.</Text>
+          ) : null}
+        </View>
       </View>
-      <Text style={styles.itemPrice}>{price}</Text>
+      <Text style={styles.itemPrice}>{amount > 0 ? formatCurrency(amount) : '--'}</Text>
     </View>
   );
 }
@@ -394,6 +726,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flex: 1,
   },
+  listItemText: {
+    flex: 1,
+  },
   statusDot: {
     width: 10,
     height: 10,
@@ -404,6 +739,12 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     color: TEXT_DARK,
+  },
+  itemMeta: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: '800',
+    marginTop: 2,
   },
   itemPrice: {
     fontSize: 14,
@@ -465,5 +806,100 @@ const styles = StyleSheet.create({
     color: TEXT_GRAY,
     fontWeight: '500',
     marginTop: 2,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-start',
+    paddingHorizontal: 18,
+    paddingTop: STATUS_BAR_HEIGHT + 16,
+  },
+  modalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15, 23, 42, 0.28)',
+  },
+  notificationPanel: {
+    width: '100%',
+    maxWidth: 520,
+    alignSelf: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    padding: 18,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    elevation: 8,
+  },
+  notificationHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  notificationTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: TEXT_DARK,
+  },
+  notificationSubtitle: {
+    fontSize: 12,
+    color: TEXT_GRAY,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  closeButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: BG_LIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notificationList: {
+    gap: 12,
+    paddingBottom: 2,
+  },
+  notificationItem: {
+    flexDirection: 'row',
+    gap: 12,
+    borderRadius: 18,
+    padding: 14,
+    backgroundColor: BG_LIGHT,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  notificationIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notificationBody: {
+    flex: 1,
+  },
+  notificationItemTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: TEXT_DARK,
+  },
+  notificationDescription: {
+    fontSize: 12,
+    color: TEXT_GRAY,
+    lineHeight: 17,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  notificationAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginTop: 10,
+    gap: 2,
+  },
+  notificationActionText: {
+    fontSize: 12,
+    color: PRIMARY_GREEN,
+    fontWeight: '900',
   },
 });

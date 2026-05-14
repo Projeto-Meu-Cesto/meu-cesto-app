@@ -1,131 +1,325 @@
-const OPENROUTER_API_KEY = process.env.EXPO_PUBLIC_OPENROUTER_API_KEY || "";
-const DEFAULT_MODEL = "inclusionai/ring-2.6-1t:free";
+import { FinanceContext } from './financeContext';
 
-/**
- * Função genérica para chamar o OpenRouter
- */
-async function callOpenRouter(messages: any[], model: string = DEFAULT_MODEL) {
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://meucesto.app", // Opcional, para o ranking do OpenRouter
-        "X-Title": "Meu Cesto App",
+const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
+const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+export const LUCA_MODELS = {
+  primary: 'gemini-2.5-flash',
+  fallback: 'gemini-2.5-flash-lite',
+};
+
+type LucaRole = 'user' | 'model';
+
+export type LucaHistoryItem = {
+  role: LucaRole;
+  parts: { text: string }[];
+};
+
+type GeminiContent = {
+  role: LucaRole;
+  parts: { text: string }[];
+};
+
+type LucaResponseParams = {
+  history: LucaHistoryItem[];
+  message: string;
+  context?: FinanceContext | null;
+  model?: string;
+};
+
+const ALLOWED_CATEGORIES = [
+  'Frutas',
+  'Laticínios',
+  'Limpeza',
+  'Higiene',
+  'Bebidas',
+  'Padaria',
+  'Carnes',
+  'Outros',
+];
+
+function formatCurrency(value: number): string {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(value || 0);
+}
+
+function normalizeText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function localCategory(productName: string): string {
+  const name = normalizeText(productName);
+
+  if (/(banana|maca|maça|uva|morango|laranja|limao|limão|abacaxi|mamao|mamão|melancia|fruta)/.test(name)) {
+    return 'Frutas';
+  }
+
+  if (/(leite|queijo|iogurte|manteiga|requeijao|requeijão|laticinio|laticínio)/.test(name)) {
+    return 'Laticínios';
+  }
+
+  if (/(detergente|sabao|sabão|amaciante|limpador|desinfetante|esponja|cloro|sanitaria|sanitária)/.test(name)) {
+    return 'Limpeza';
+  }
+
+  if (/(shampoo|sabonete|pasta|escova|desodorante|papel higienico|papel higiênico|absorvente)/.test(name)) {
+    return 'Higiene';
+  }
+
+  if (/(agua|água|suco|refrigerante|cerveja|vinho|cafe|café|cha|chá|bebida)/.test(name)) {
+    return 'Bebidas';
+  }
+
+  if (/(pao|pão|bolo|biscoito|bolacha|rosca|baguete|padaria)/.test(name)) {
+    return 'Padaria';
+  }
+
+  if (/(carne|frango|peixe|linguica|linguiça|presunto|salame|bife|costela)/.test(name)) {
+    return 'Carnes';
+  }
+
+  return 'Outros';
+}
+
+export function categorizeProductLocal(productName: string): string {
+  return localCategory(productName);
+}
+
+async function callGeminiText({
+  contents,
+  systemInstruction,
+  model = LUCA_MODELS.primary,
+  temperature = 0.35,
+  maxOutputTokens = 900,
+}: {
+  contents: GeminiContent[];
+  systemInstruction?: string;
+  model?: string;
+  temperature?: number;
+  maxOutputTokens?: number;
+}): Promise<string> {
+  if (!GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY_MISSING');
+  }
+
+  const response = await fetch(`${GEMINI_ENDPOINT}/${model}:generateContent?key=${GEMINI_API_KEY}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      contents,
+      systemInstruction: systemInstruction
+        ? {
+            parts: [{ text: systemInstruction }],
+          }
+        : undefined,
+      generationConfig: {
+        temperature,
+        topP: 0.9,
+        maxOutputTokens,
       },
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-      }),
-    });
+    }),
+  });
 
-    const data = await response.json();
-    
-    if (data.error) {
-      console.error("Erro OpenRouter API:", data.error);
-      throw new Error(data.error.message || "Erro na API do OpenRouter");
+  const data = await response.json();
+
+  if (!response.ok || data.error) {
+    const message = data.error?.message || `Gemini HTTP ${response.status}`;
+    throw new Error(message);
+  }
+
+  const text = data.candidates?.[0]?.content?.parts
+    ?.map((part: { text?: string }) => part.text || '')
+    .join('')
+    .trim();
+
+  if (!text) {
+    throw new Error('Gemini não retornou texto.');
+  }
+
+  return text;
+}
+
+function buildContextBlock(context?: FinanceContext | null): string {
+  if (!context) {
+    return 'Dados reais do usuário: ainda não carregados.';
+  }
+
+  const topItems = context.topItems.length > 0
+    ? context.topItems.map((item) => `${item.name} (${formatCurrency(item.price)})`).join(', ')
+    : 'nenhum item com preço registrado';
+
+  const monthlyTotals = context.monthlyTotals.length > 0
+    ? context.monthlyTotals.map((month) => `${month.label}: ${formatCurrency(month.total)}`).join('; ')
+    : 'sem histórico mensal suficiente';
+
+  return `Dados reais do usuário:
+- Mês atual: ${context.currentMonthLabel}
+- Total do mês atual: ${formatCurrency(context.currentMonthTotal)}
+- Total do mês anterior: ${formatCurrency(context.previousMonthTotal)}
+- Estimativa mensal pela média recente: ${context.estimatedMonthlySpend > 0 ? formatCurrency(context.estimatedMonthlySpend) : 'sem dados suficientes'}
+- Quantidade de compras confirmadas no mês atual: ${context.currentMonthItemCount}
+- Gastos por categoria no mês atual:
+  - Alimentação: ${formatCurrency(context.categoryTotals.Alimentação)}
+  - Transporte: ${formatCurrency(context.categoryTotals.Transporte)}
+  - Outros: ${formatCurrency(context.categoryTotals.Outros)}
+- Últimos itens com preço: ${topItems}
+- Evolução mensal recente: ${monthlyTotals}`;
+}
+
+function buildLucaSystemInstruction(context?: FinanceContext | null): string {
+  return `Você é Luca, assistente financeiro e especialista em compras inteligentes do app Meu Cesto.
+
+PERSONALIDADE:
+- Fale em português brasileiro.
+- Seja amigável, direto e útil.
+- Use linguagem simples.
+- Responda curto por padrão, mas detalhe quando o usuário pedir análise.
+- Use markdown simples quando ajudar: títulos curtos, listas e negrito.
+
+ESCOPO:
+- Ajude com gastos, orçamento doméstico, mercado, lista de compras, economia e comparação de consumo.
+- Não dê recomendação de investimento de risco.
+- Não invente números, preços, saldos ou históricos.
+- Quando não houver dados suficientes, diga isso claramente e sugira o próximo passo prático.
+
+REGRAS DE DADOS:
+- Use os dados reais abaixo como fonte principal.
+- Se a pergunta pedir análise dos gastos, cite total do mês, categoria mais forte e uma ação concreta.
+- Se os dados estiverem zerados, oriente o usuário a adicionar itens com preço para melhorar a análise.
+- Não diga que acessou banco, Open Finance ou cartão; este app usa a lista e o histórico registrados pelo usuário.
+
+${buildContextBlock(context)}`;
+}
+
+function localLucaFallback(message: string, context?: FinanceContext | null): string {
+  const normalized = normalizeText(message);
+
+  if (context && (normalized.includes('gasto') || normalized.includes('analise') || normalized.includes('mês') || normalized.includes('mes'))) {
+    const categoryEntries = Object.entries(context.categoryTotals).sort((a, b) => b[1] - a[1]);
+    const [topCategory, topValue] = categoryEntries[0] || ['Outros', 0];
+
+    if (context.currentMonthTotal <= 0) {
+      return '**Análise do mês**\n\nAinda não tenho compras confirmadas neste mês. Adicione itens com preço na lista e marque como comprados para eu calcular total, categorias e tendência.';
     }
 
-    return data.choices[0].message.content;
-  } catch (error) {
-    console.error("Erro ao chamar OpenRouter:", error);
-    throw error;
+    return `**Análise do mês**\n\nVocê confirmou **${formatCurrency(context.currentMonthTotal)}** em compras neste mês.\n\n- Categoria principal: **${topCategory}** (${formatCurrency(topValue)})\n- Compras confirmadas: **${context.currentMonthItemCount}**\n- Estimativa mensal: **${context.estimatedMonthlySpend > 0 ? formatCurrency(context.estimatedMonthlySpend) : 'sem dados suficientes'}**\n\nAção prática: revise os itens de ${topCategory} e veja se algum pode ser comprado em maior quantidade, trocado por marca equivalente ou cortado na próxima lista.`;
   }
+
+  if (!GEMINI_API_KEY) {
+    return 'A chave do Gemini ainda não está configurada no `.env`. Mesmo assim, posso fazer análises básicas quando houver itens com preço na sua lista.';
+  }
+
+  return 'Não consegui acessar a IA agora. Tente novamente em instantes; se quiser, peça “analise meus gastos do mês” que eu faço uma leitura básica com os dados salvos.';
 }
 
 export const categorizeProduct = async (productName: string): Promise<string> => {
-  try {
-    const messages = [
-      { 
-        role: "system", 
-        content: "Você é um assistente que categoriza produtos de mercado. Responda APENAS o nome da categoria." 
-      },
-      { 
-        role: "user", 
-        content: `Categorize o produto "${productName}" em uma das seguintes categorias: Frutas, Laticínios, Limpeza, Higiene, Bebidas, Padaria, Carnes ou Outros.` 
-      }
-    ];
+  const fallback = localCategory(productName);
 
-    const result = await callOpenRouter(messages);
-    return result.trim();
+  try {
+    const result = await callGeminiText({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `Categorize o produto "${productName}" em uma destas categorias: ${ALLOWED_CATEGORIES.join(', ')}. Responda apenas a categoria.`,
+            },
+          ],
+        },
+      ],
+      systemInstruction: 'Você classifica produtos de mercado. Responda só com uma categoria permitida.',
+      model: LUCA_MODELS.fallback,
+      temperature: 0.1,
+      maxOutputTokens: 20,
+    });
+
+    const clean = result.replace(/[^\p{L}\s]/gu, '').trim();
+    return ALLOWED_CATEGORIES.includes(clean) ? clean : fallback;
   } catch (error) {
-    console.error("Erro ao categorizar:", error);
-    return "Outros";
+    console.warn('Fallback local de categoria usado:', error);
+    return fallback;
   }
 };
 
 export const filterResultsWithAI = async (results: any[], activeFilter: string): Promise<any[]> => {
-  if (activeFilter === "Tudo") return results;
-  
-  try {
-    const productList = results.map(r => r.description).join(", ");
-    const messages = [
-      {
-        role: "system",
-        content: "Você é um filtro de produtos. Responda apenas os nomes dos produtos que pertencem à categoria solicitada, separados por ponto e vírgula."
-      },
-      {
-        role: "user",
-        content: `Dada a lista de produtos: [${productList}], quais pertencem à categoria "${activeFilter}"? Se nenhum pertencer, retorne "Nenhum".`
-      }
-    ];
+  if (activeFilter === 'Tudo') return results;
 
-    const response = await callOpenRouter(messages);
-    const matches = response.split(";").map((s: string) => s.trim().toLowerCase());
-    
-    if (matches.includes("nenhum")) return [];
-    
-    return results.filter(r => matches.some((m: string) => r.description.toLowerCase().includes(m)));
+  const localMatches = results.filter((result) => localCategory(result.description) === activeFilter);
+
+  try {
+    const productList = results.map((result) => result.description).join('; ');
+    const response = await callGeminiText({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `Lista: ${productList}\nCategoria desejada: ${activeFilter}\nRetorne apenas os nomes que pertencem à categoria, separados por ponto e vírgula. Se nenhum, responda "Nenhum".`,
+            },
+          ],
+        },
+      ],
+      systemInstruction: 'Você filtra produtos de mercado com precisão e responde só no formato pedido.',
+      model: LUCA_MODELS.fallback,
+      temperature: 0.1,
+      maxOutputTokens: 300,
+    });
+
+    const matches = response.split(';').map((item) => item.trim().toLowerCase());
+    if (matches.some((item) => item === 'nenhum')) return [];
+
+    return results.filter((result) =>
+      matches.some((match) => result.description.toLowerCase().includes(match))
+    );
   } catch (error) {
-    console.error("Erro ao filtrar:", error);
-    return results;
+    console.warn('Fallback local de filtro usado:', error);
+    return localMatches.length > 0 ? localMatches : results;
   }
 };
 
-export const getLucaResponse = async (history: { role: "user" | "model", parts: { text: string }[] }[], message: string) => {
-  const systemInstruction = `Você é Luca, assistente financeiro e especialista em compras inteligentes do app Meu Cesto.
-
-PERSONALIDADE:
-- Tom amigável, direto e encorajador, como um amigo que entende de finanças.
-- Use linguagem simples, evite jargões desnecessários.
-- Seja objetivo: respostas curtas quando possível, detalhadas quando necessário.
-- Pode usar emojis com moderação para deixar a conversa mais leve.
-
-ESPECIALIDADES:
-1. Análise de gastos e orçamento pessoal.
-2. Dicas de economia no supermercado e compras do dia a dia.
-3. Comparação de preços e custo-benefício de produtos.
-4. Planejamento financeiro doméstico.
-5. Identificação de desperdícios e onde cortar gastos.
-6. Sugestões de produtos substitutos mais baratos.
-
-CONTEXTO DO APP:
-- O usuário usa o app para gerenciar listas de compras e finanças pessoais.
-- Você tem acesso ao histórico de compras e gastos do usuário quando ele compartilhar.
-- Foque sempre em economia prática e resultados reais no bolso do usuário.
-
-REGRAS:
-- NUNCA faça recomendações de investimentos de risco (ações, cripto, etc.).
-- Se perguntado sobre algo fora do seu escopo, redirecione gentilmente para finanças e compras.
-- Sempre que der uma dica de economia, tente quantificar o impacto (ex: "isso pode economizar R$ X por mês").
-- Não invente dados ou preços, diga que não tem essa informação se não souber.
-- Responda sempre em português brasileiro.`;
+export const getLucaResponse = async ({
+  history,
+  message,
+  context,
+  model = LUCA_MODELS.primary,
+}: LucaResponseParams): Promise<string> => {
+  const contents: GeminiContent[] = [
+    ...history.slice(-12),
+    {
+      role: 'user',
+      parts: [{ text: message }],
+    },
+  ];
 
   try {
-    // Converte o histórico do formato Gemini para o formato OpenAI/OpenRouter
-    const formattedMessages = [
-      { role: "system", content: systemInstruction },
-      ...history.map(h => ({
-        role: h.role === "model" ? "assistant" : "user",
-        content: h.parts[0].text
-      })),
-      { role: "user", content: message }
-    ];
+    return await callGeminiText({
+      contents,
+      systemInstruction: buildLucaSystemInstruction(context),
+      model,
+      temperature: 0.45,
+      maxOutputTokens: 1100,
+    });
+  } catch (primaryError) {
+    console.warn('Modelo principal do Gemini falhou:', primaryError);
 
-    return await callOpenRouter(formattedMessages);
-  } catch (error) {
-    console.error("Erro no chat do Luca:", error);
-    return "Desculpe, tive um probleminha aqui. Pode repetir a pergunta?";
+    try {
+      return await callGeminiText({
+        contents,
+        systemInstruction: buildLucaSystemInstruction(context),
+        model: LUCA_MODELS.fallback,
+        temperature: 0.35,
+        maxOutputTokens: 900,
+      });
+    } catch (fallbackError) {
+      console.warn('Fallback do Gemini falhou:', fallbackError);
+      return localLucaFallback(message, context);
+    }
   }
 };

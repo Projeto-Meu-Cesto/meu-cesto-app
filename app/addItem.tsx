@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import { addDoc, collection, Timestamp } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -18,11 +18,11 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { categorizeProduct } from '../scripts/aiService';
+import { categorizeProductLocal } from '../scripts/aiService';
 import { CosmosProduct, fetchFallbackImage, fetchProductsByName } from '../scripts/cosmosService';
 import { auth, db } from '../scripts/firebaseConfig';
 
-const { width, height } = Dimensions.get('window');
+const { height } = Dimensions.get('window');
 const STATUS_BAR_HEIGHT = Platform.OS === 'android'
   ? (StatusBar.currentHeight ?? 24)
   : 44; // iOS safe area top (cobre notch e Dynamic Island)
@@ -31,9 +31,64 @@ const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
+const SAVE_TIMEOUT_MS = 1400;
+
+type ItemPayload = {
+  name: string;
+  price: string;
+  quantity: number;
+  brand: string;
+  thumbnail: string;
+  checked: boolean;
+  category: string;
+  createdAt: Timestamp;
+  checkedAt: null;
+};
+
+function wait(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizePriceTyping(value: string) {
+  const clean = value.replace(/[^\d,.]/g, '').replace(/\./g, ',');
+  const [whole, ...decimalParts] = clean.split(',');
+
+  if (decimalParts.length === 0) {
+    return whole;
+  }
+
+  return `${whole},${decimalParts.join('').slice(0, 2)}`;
+}
+
+function normalizePriceForStorage(value: string) {
+  const normalized = value
+    .replace(/[^\d,.-]/g, '')
+    .replace(/\.(?=\d{3}(\D|$))/g, '')
+    .replace(',', '.');
+
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed.toFixed(2).replace('.', ',')
+    : '';
+}
+
+function normalizeQuantityTyping(value: string) {
+  return value.replace(/[^\d]/g, '').slice(0, 3);
+}
+
+function normalizeProductNameTyping(value: string) {
+  return value.toLocaleUpperCase('pt-BR');
+}
+
+function parseQuantity(value: string) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
 
 export default function AddItemScreen() {
   const [name, setName] = useState('');
+  const [manualPrice, setManualPrice] = useState('');
+  const [quantity, setQuantity] = useState('1');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<CosmosProduct[]>([]);
   const [selectedItems, setSelectedItems] = useState<CosmosProduct[]>([]);
@@ -42,6 +97,7 @@ export default function AddItemScreen() {
   const [showModal, setShowModal] = useState(false);
   const [detailImage, setDetailImage] = useState<string | null>(null);
   const [loadingImage, setLoadingImage] = useState(false);
+  const [saving, setSaving] = useState(false);
   const filters = ['Tudo', 'Frutas', 'Laticínios', 'Limpeza', 'Higiene', 'Bebidas', 'Padaria', 'Carnes'];
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
@@ -80,8 +136,8 @@ export default function AddItemScreen() {
         });
 
         setResults(sorted);
-      } catch (error) {
-        console.error('[Cosmos] Erro:', error);
+      } catch {
+        console.warn('[Cosmos] Busca indisponível. Você ainda pode adicionar manualmente.');
         setResults([]);
       } finally {
         setSearching(false);
@@ -109,47 +165,102 @@ export default function AddItemScreen() {
       return;
     }
 
+    if (saving) return;
+
+    setSaving(true);
     try {
+      const payloads: ItemPayload[] = [];
+
       if (selectedItems.length > 0) {
-        for (const item of selectedItems) {
+        selectedItems.forEach((item) => {
+          const itemName = normalizeProductNameTyping(item.description);
           const itemToAdd = {
-            name: item.description,
+            name: itemName,
             price: item.avg_price?.toString() || '',
+            quantity: 1,
             brand: item.brand?.name || '',
             thumbnail: item.thumbnail || ''
           };
 
-          const category = await categorizeProduct(item.description);
+          const category = categorizeProductLocal(itemName);
 
-          await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
+          payloads.push({
             ...itemToAdd,
             checked: false,
             category: category,
-            createdAt: serverTimestamp(),
+            createdAt: Timestamp.now(),
+            checkedAt: null,
           });
-        }
+        });
       } else {
         if (!name.trim()) {
           Alert.alert('Aviso', 'Digite o nome do produto ou selecione na lista.');
+          setSaving(false);
           return;
         }
 
-        const category = await categorizeProduct(name);
+        const cleanName = normalizeProductNameTyping(name.trim());
+        const cleanPrice = normalizePriceForStorage(manualPrice);
+        const cleanQuantity = parseQuantity(quantity);
+        const category = categorizeProductLocal(cleanName);
 
-        await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
-          name: name,
-          price: '',
+        payloads.push({
+          name: cleanName,
+          price: cleanPrice,
+          quantity: cleanQuantity,
           brand: '',
           thumbnail: '',
           checked: false,
           category: category,
-          createdAt: serverTimestamp(),
+          createdAt: Timestamp.now(),
+          checkedAt: null,
         });
       }
-      router.back();
-    } catch (error) {
-      console.error(error);
-      Alert.alert('Erro', 'Não foi possível salvar os itens.');
+
+      const writes = payloads.map((payload) =>
+        addDoc(collection(db, 'users', user.uid, 'shopping_list'), payload)
+      );
+
+      const saveResult = Promise.all(writes)
+        .then(() => 'saved' as const)
+        .catch((error) => {
+          console.warn('[Lista] Erro ao salvar item:', error);
+          return 'failed' as const;
+        });
+
+      const result = await Promise.race([
+        saveResult,
+        wait(SAVE_TIMEOUT_MS).then(() => 'pending' as const),
+      ]);
+
+      if (result === 'failed') {
+        Alert.alert(
+          'Erro ao salvar',
+          'Não foi possível adicionar agora. Verifique sua conexão e tente novamente.'
+        );
+        return;
+      }
+
+      if (result === 'pending') {
+        saveResult.then((finalResult) => {
+          if (finalResult === 'failed') {
+            console.warn('[Lista] A gravação em segundo plano falhou.');
+          }
+        });
+      }
+
+      setName('');
+      setManualPrice('');
+      setQuantity('1');
+      setSelectedItems([]);
+      router.replace('/lists');
+    } catch {
+      Alert.alert(
+        'Erro ao salvar',
+        'Não foi possível adicionar agora. Verifique sua conexão e se o Firebase está liberado para sua conta.'
+      );
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -176,14 +287,44 @@ export default function AddItemScreen() {
             style={styles.input}
             placeholder="Nome do produto"
             value={name}
-            onChangeText={setName}
+            onChangeText={(value) => setName(normalizeProductNameTyping(value))}
             placeholderTextColor="#94A3B8"
             autoFocus
+            autoCapitalize="characters"
+            autoCorrect={false}
             returnKeyType="search"
           />
           {searching && (
             <ActivityIndicator size="small" color={PRIMARY_GREEN} style={{ marginLeft: 8 }} />
           )}
+        </View>
+
+        <View style={styles.inputRow}>
+          <View style={[styles.inputWrapper, styles.priceInputWrapper, styles.priceInput]}>
+            <Ionicons name="cash-outline" size={20} color="#94A3B8" style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Preço. Ex: 4,99"
+              value={manualPrice}
+              onChangeText={(value) => setManualPrice(normalizePriceTyping(value))}
+              placeholderTextColor="#94A3B8"
+              keyboardType="decimal-pad"
+              returnKeyType="done"
+            />
+          </View>
+
+          <View style={[styles.inputWrapper, styles.priceInputWrapper, styles.quantityInput]}>
+            <Ionicons name="layers-outline" size={20} color="#94A3B8" style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Qtd."
+              value={quantity}
+              onChangeText={(value) => setQuantity(normalizeQuantityTyping(value))}
+              placeholderTextColor="#94A3B8"
+              keyboardType="number-pad"
+              returnKeyType="done"
+            />
+          </View>
         </View>
       </View>
 
@@ -262,9 +403,12 @@ export default function AddItemScreen() {
                               setDetailImage(item.thumbnail);
                             } else {
                               setLoadingImage(true);
-                              const fallback = await fetchFallbackImage(item.gtin);
-                              setDetailImage(fallback);
-                              setLoadingImage(false);
+                              try {
+                                const fallback = await fetchFallbackImage(item.gtin);
+                                setDetailImage(fallback);
+                              } finally {
+                                setLoadingImage(false);
+                              }
                             }
                           }}
                           style={styles.detailsBtn}
@@ -287,22 +431,28 @@ export default function AddItemScreen() {
         {!searching && name.trim().length >= 3 && results.length === 0 && (
           <View style={styles.noResultContainer}>
             <Ionicons name="search-outline" size={36} color="#CBD5E1" />
-            <Text style={styles.noResultText}>Nenhum produto encontrado{"\n"}para "{name}"</Text>
+            <Text style={styles.noResultText}>
+              Nenhum produto encontrado{"\n"}para {name}
+            </Text>
           </View>
         )}
 
         <TouchableOpacity
           style={[styles.addButton, (!name.trim() && selectedItems.length === 0) && { opacity: 0.5 }]}
           onPress={handleAddItem}
-          disabled={(!name.trim() && selectedItems.length === 0) || searching}
+          disabled={(!name.trim() && selectedItems.length === 0) || searching || saving}
           activeOpacity={0.85}
         >
-          <Text style={styles.addButtonText}>
-            {selectedItems.length > 0
-              ? `Adicionar ${selectedItems.length} item${selectedItems.length > 1 ? 's' : ''}`
-              : 'Adicionar à lista'
-            }
-          </Text>
+          {saving ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.addButtonText}>
+              {selectedItems.length > 0
+                ? `Adicionar ${selectedItems.length} item${selectedItems.length > 1 ? 's' : ''}`
+                : 'Adicionar à lista'
+              }
+            </Text>
+          )}
         </TouchableOpacity>
 
       </ScrollView>
@@ -434,6 +584,19 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     paddingHorizontal: 15,
     height: 52,
+  },
+  priceInputWrapper: {
+    marginTop: 10,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  priceInput: {
+    flex: 1,
+  },
+  quantityInput: {
+    width: 118,
   },
   inputIcon: {
     marginRight: 10,

@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useRef, useState } from 'react';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { addDoc, collection, getDocs, limit, orderBy, query, serverTimestamp, setDoc, doc } from 'firebase/firestore';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Animated,
-  Dimensions,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -17,35 +19,91 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { getLucaResponse } from '../scripts/aiService';
-import { auth } from '../scripts/firebaseConfig';
+import { getLucaResponse, LucaHistoryItem, LUCA_MODELS } from '../scripts/aiService';
+import { FinanceContext, getUserFinanceContext, shouldAttachFinanceChart } from '../scripts/financeContext';
+import { auth, db } from '../scripts/firebaseConfig';
 
-const { width } = Dimensions.get('window');
 const PRIMARY_GREEN = '#00A36C';
 const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
+const BG_LIGHT = '#F8FAFC';
+const DEFAULT_CHAT_ID = 'principal';
+const HISTORY_TIMEOUT_MS = 4500;
+const FINANCE_CONTEXT_TIMEOUT_MS = 3500;
+
+type ChartBar = {
+  label: string;
+  value: number;
+  color: string;
+};
+
+type MessageChart = {
+  title: string;
+  total: number;
+  bars: ChartBar[];
+};
 
 interface Message {
   id: string;
   text: string;
   sender: 'user' | 'luca';
+  createdAt?: any;
+  model?: string;
+  chart?: MessageChart | null;
 }
-
-type GeminiHistory = {
-  role: 'user' | 'model';
-  parts: { text: string }[];
-};
 
 const QUICK_ACTIONS = [
   { id: '1', label: 'Como economizar no mercado?', icon: 'leaf-outline' },
   { id: '2', label: 'Analise meus gastos do mês', icon: 'stats-chart-outline' },
   { id: '3', label: 'Dicas de lista de compras', icon: 'list-outline' },
-  { id: '4', label: 'Produtos mais baratos', icon: 'pricetag-outline' },
+  { id: '4', label: 'Quais categorias pesaram mais?', icon: 'pie-chart-outline' },
 ];
 
-// Dot loader animado
+function formatCurrency(value: number): string {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(value || 0);
+}
+
+function buildChart(context: FinanceContext): MessageChart {
+  return {
+    title: 'Gastos por categoria',
+    total: context.currentMonthTotal,
+    bars: [
+      { label: 'Alimentação', value: context.categoryTotals.Alimentação, color: PRIMARY_GREEN },
+      { label: 'Transporte', value: context.categoryTotals.Transporte, color: '#38BDF8' },
+      { label: 'Outros', value: context.categoryTotals.Outros, color: '#F59E0B' },
+    ],
+  };
+}
+
+function toGeminiHistory(messages: Message[]): LucaHistoryItem[] {
+  return messages
+    .filter((message) => message.text.trim().length > 0)
+    .slice(-12)
+    .map((message) => ({
+      role: message.sender === 'luca' ? 'model' : 'user',
+      parts: [{ text: message.text }],
+    }));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs);
+
+    promise
+      .then((value) => resolve(value))
+      .catch((error) => reject(error))
+      .finally(() => clearTimeout(timer));
+  });
+}
+
 function TypingDots() {
-  const dots = [useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current];
+  const dotOne = useRef(new Animated.Value(0)).current;
+  const dotTwo = useRef(new Animated.Value(0)).current;
+  const dotThree = useRef(new Animated.Value(0)).current;
+  const dots = useMemo(() => [dotOne, dotTwo, dotThree], [dotOne, dotTwo, dotThree]);
 
   React.useEffect(() => {
     const animations = dots.map((dot, i) =>
@@ -57,81 +115,355 @@ function TypingDots() {
         ])
       )
     );
-    animations.forEach(a => a.start());
-    return () => animations.forEach(a => a.stop());
-  }, []);
+    animations.forEach((animation) => animation.start());
+    return () => animations.forEach((animation) => animation.stop());
+  }, [dots]);
 
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4 }}>
+    <View style={styles.typingDots}>
       {dots.map((dot, i) => (
         <Animated.View
           key={i}
-          style={{
-            width: 8, height: 8, borderRadius: 4,
-            backgroundColor: PRIMARY_GREEN,
-            opacity: dot,
-            transform: [{ scale: dot.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }) }],
-          }}
+          style={[
+            styles.typingDot,
+            {
+              opacity: dot,
+              transform: [{ scale: dot.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] }) }],
+            },
+          ]}
         />
       ))}
     </View>
   );
 }
 
-export default function LucaScreen() {
+function InlineMarkdown({ text, isUser = false }: { text: string; isUser?: boolean }) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+
+  return (
+    <Text style={[styles.markdownText, isUser && styles.markdownTextUser]}>
+      {parts.map((part, index) => {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          return (
+            <Text key={`${part}-${index}`} style={styles.markdownBold}>
+              {part.slice(2, -2)}
+            </Text>
+          );
+        }
+
+        return <Text key={`${part}-${index}`}>{part}</Text>;
+      })}
+    </Text>
+  );
+}
+
+function MarkdownMessage({ text, isUser = false }: { text: string; isUser?: boolean }) {
+  const lines = text.split('\n');
+
+  return (
+    <View style={styles.markdownBlock}>
+      {lines.map((line, index) => {
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+          return <View key={`space-${index}`} style={styles.markdownSpacer} />;
+        }
+
+        if (trimmed.startsWith('### ')) {
+          return (
+            <Text key={`h3-${index}`} style={[styles.markdownHeading, isUser && styles.markdownTextUser]}>
+              {trimmed.replace(/^###\s+/, '')}
+            </Text>
+          );
+        }
+
+        if (trimmed.startsWith('## ')) {
+          return (
+            <Text key={`h2-${index}`} style={[styles.markdownHeading, isUser && styles.markdownTextUser]}>
+              {trimmed.replace(/^##\s+/, '')}
+            </Text>
+          );
+        }
+
+        if (/^[-*]\s+/.test(trimmed)) {
+          return (
+            <View key={`bullet-${index}`} style={styles.bulletRow}>
+              <Text style={[styles.bulletDot, isUser && styles.markdownTextUser]}>•</Text>
+              <View style={styles.bulletText}>
+                <InlineMarkdown text={trimmed.replace(/^[-*]\s+/, '')} isUser={isUser} />
+              </View>
+            </View>
+          );
+        }
+
+        if (/^\d+\.\s+/.test(trimmed)) {
+          const marker = trimmed.match(/^\d+\./)?.[0] || '';
+          return (
+            <View key={`number-${index}`} style={styles.bulletRow}>
+              <Text style={[styles.numberMarker, isUser && styles.markdownTextUser]}>{marker}</Text>
+              <View style={styles.bulletText}>
+                <InlineMarkdown text={trimmed.replace(/^\d+\.\s+/, '')} isUser={isUser} />
+              </View>
+            </View>
+          );
+        }
+
+        return <InlineMarkdown key={`text-${index}`} text={trimmed} isUser={isUser} />;
+      })}
+    </View>
+  );
+}
+
+function FinanceMiniChart({ chart }: { chart: MessageChart }) {
+  const maxValue = Math.max(...chart.bars.map((bar) => bar.value), 1);
+
+  return (
+    <View style={styles.chartCard}>
+      <View style={styles.chartHeader}>
+        <Text style={styles.chartTitle}>{chart.title}</Text>
+        <Text style={styles.chartTotal}>{formatCurrency(chart.total)}</Text>
+      </View>
+
+      {chart.bars.map((bar) => (
+        <View key={bar.label} style={styles.chartRow}>
+          <View style={styles.chartLabelRow}>
+            <Text style={styles.chartLabel}>{bar.label}</Text>
+            <Text style={styles.chartValue}>{formatCurrency(bar.value)}</Text>
+          </View>
+          <View style={styles.chartTrack}>
+            <View
+              style={[
+                styles.chartFill,
+                {
+                  width: `${Math.max(4, (bar.value / maxValue) * 100)}%` as any,
+                  backgroundColor: bar.color,
+                },
+              ]}
+            />
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
   const router = useRouter();
-  const user = auth.currentUser;
+  const [user, setUser] = useState<User | null>(auth.currentUser);
+  const [authReady, setAuthReady] = useState(Boolean(auth.currentUser));
+  const userUid = user?.uid;
   const userName = user?.displayName?.split(' ')[0] || 'amigo';
+  const messagesPath = React.useMemo(
+    () => userUid
+      ? collection(db, 'users', userUid, 'luca_chats', DEFAULT_CHAT_ID, 'messages')
+      : null,
+    [userUid]
+  );
 
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
-  // Histórico no formato Gemini, mantido em paralelo
-  const geminiHistory = useRef<GeminiHistory[]>([]);
-  const flatListRef = useRef<FlatList>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyWarning, setHistoryWarning] = useState(false);
+  const flatListRef = useRef<FlatList<Message>>(null);
 
   const hasMessages = messages.length > 0;
 
-  const sendMessage = useCallback(async (textToSend: string) => {
-    if (!textToSend.trim() || loading) return;
+  React.useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+      setAuthReady(true);
 
-    const userMsg: Message = { id: Date.now().toString(), text: textToSend, sender: 'user' };
-    setMessages(prev => [...prev, userMsg]);
+      if (!nextUser) {
+        router.replace('/');
+      }
+    });
+
+    return unsubscribe;
+  }, [router]);
+
+  React.useEffect(() => {
+    if (!authReady) return;
+
+    if (!user || !messagesPath) {
+      setHistoryLoading(false);
+      return;
+    }
+
+    let active = true;
+    const loadHistory = async () => {
+      try {
+        setHistoryLoading(true);
+        setHistoryWarning(false);
+        const historyQuery = query(messagesPath, orderBy('createdAt', 'desc'), limit(30));
+        const snapshot = await withTimeout(getDocs(historyQuery), HISTORY_TIMEOUT_MS);
+        const loaded = snapshot.docs
+          .map((messageDoc) => ({
+            id: messageDoc.id,
+            ...messageDoc.data(),
+          })) as Message[];
+
+        if (!active) return;
+
+        setMessages(loaded.reverse());
+      } catch (error) {
+        console.error('[Luca] Erro ao carregar histórico:', error);
+        if (active) {
+          setHistoryWarning(true);
+        }
+      } finally {
+        if (active) {
+          setHistoryLoading(false);
+        }
+      }
+    };
+
+    loadHistory();
+
+    return () => {
+      active = false;
+    };
+  }, [authReady, messagesPath, user]);
+
+  React.useEffect(() => {
+    if (historyLoading) {
+      const timer = setTimeout(() => {
+        setHistoryLoading(false);
+        setHistoryWarning(true);
+      }, HISTORY_TIMEOUT_MS + 700);
+
+      return () => clearTimeout(timer);
+    }
+  }, [historyLoading]);
+
+  const saveMessage = useCallback(async (message: Omit<Message, 'id'>) => {
+    if (!user || !messagesPath) return;
+
+    await setDoc(
+      doc(db, 'users', user.uid, 'luca_chats', DEFAULT_CHAT_ID),
+      {
+        title: 'Conversa principal',
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return addDoc(messagesPath, {
+      ...message,
+      createdAt: serverTimestamp(),
+    });
+  }, [messagesPath, user]);
+
+  const copyMessage = useCallback(async (text: string) => {
+    try {
+      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(text);
+        Alert.alert('Copiado', 'Resposta copiada para a área de transferência.');
+        return;
+      }
+
+      Alert.alert('Copiar resposta', text);
+    } catch {
+      Alert.alert('Copiar resposta', text);
+    }
+  }, []);
+
+  const sendMessage = useCallback(async (textToSend: string) => {
+    const cleanText = textToSend.trim();
+    if (!cleanText || loading || !user) return;
+
     setInput('');
     setLoading(true);
 
-    // Rola para o final após adicionar mensagem
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 50);
+    const userMsg: Message = {
+      id: `local-user-${Date.now()}`,
+      text: cleanText,
+      sender: 'user',
+      createdAt: new Date().toISOString(),
+    };
+
+    setMessages((prev) => [...prev, userMsg]);
 
     try {
-      // Chama a IA com o histórico atual + nova mensagem
-      const responseText = await getLucaResponse(geminiHistory.current, textToSend);
+      saveMessage({
+        text: cleanText,
+        sender: 'user',
+      }).catch((error) => console.warn('[Luca] Mensagem do usuário não foi salva ainda:', error));
 
-      // Atualiza o histórico Gemini com o par user→model
-      geminiHistory.current = [
-        ...geminiHistory.current,
-        { role: 'user', parts: [{ text: textToSend }] },
-        { role: 'model', parts: [{ text: responseText }] },
-      ];
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 80);
 
-      const lucaMsg: Message = { id: (Date.now() + 1).toString(), text: responseText, sender: 'luca' };
-      setMessages(prev => [...prev, lucaMsg]);
+      let financeContext: FinanceContext | null = null;
+
+      try {
+        financeContext = await withTimeout(getUserFinanceContext(user.uid), FINANCE_CONTEXT_TIMEOUT_MS);
+      } catch (contextError) {
+        console.warn('[Luca] Contexto financeiro lento. Respondendo sem bloquear:', contextError);
+      }
+
+      const responseText = await getLucaResponse({
+        history: toGeminiHistory([...messages, userMsg]),
+        message: cleanText,
+        context: financeContext,
+        model: LUCA_MODELS.primary,
+      });
+
+      const lucaMsg: Message = {
+        id: `local-luca-${Date.now()}`,
+        text: responseText,
+        sender: 'luca',
+        model: LUCA_MODELS.primary,
+        chart: financeContext && shouldAttachFinanceChart(cleanText, financeContext) ? buildChart(financeContext) : null,
+        createdAt: new Date().toISOString(),
+      };
+
+      setMessages((prev) => [...prev, lucaMsg]);
+
+      saveMessage({
+        text: lucaMsg.text,
+        sender: lucaMsg.sender,
+        model: lucaMsg.model,
+        chart: lucaMsg.chart,
+      }).catch((error) => console.warn('[Luca] Resposta do Luca não foi salva ainda:', error));
     } catch (err) {
       console.error('[Luca] Erro:', err);
-      const errMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        text: 'Desculpe, tive um problema. Pode tentar novamente?',
+      const errorMsg: Message = {
+        id: `local-error-${Date.now()}`,
+        text: 'Desculpe, tive um problema para responder agora. Pode tentar novamente?',
         sender: 'luca',
+        model: 'local-fallback',
+        createdAt: new Date().toISOString(),
       };
-      setMessages(prev => [...prev, errMsg]);
+
+      setMessages((prev) => [...prev, errorMsg]);
+
+      saveMessage({
+        text: errorMsg.text,
+        sender: errorMsg.sender,
+        model: errorMsg.model,
+      }).catch((error) => console.warn('[Luca] Erro local não foi salvo ainda:', error));
     } finally {
       setLoading(false);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 120);
     }
-  }, [loading]);
+  }, [loading, messages, saveMessage, user]);
+
+  const handleInputKeyPress = useCallback((event: any) => {
+    if (Platform.OS !== 'web') return;
+
+    const nativeEvent = event?.nativeEvent;
+    const key = nativeEvent?.key;
+    const shiftKey = Boolean(nativeEvent?.shiftKey);
+
+    if (key === 'Enter' && !shiftKey) {
+      event.preventDefault?.();
+      nativeEvent.preventDefault?.();
+      sendMessage(input);
+    }
+  }, [input, sendMessage]);
 
   const renderMessage = useCallback(({ item }: { item: Message }) => {
     const isUser = item.sender === 'user';
+
     return (
       <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowLuca]}>
         {!isUser && (
@@ -139,14 +471,20 @@ export default function LucaScreen() {
             <Ionicons name="sparkles" size={13} color={PRIMARY_GREEN} />
           </View>
         )}
+
         <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleLuca]}>
-          <Text style={[styles.bubbleText, isUser && styles.bubbleTextUser]}>
-            {item.text}
-          </Text>
+          <MarkdownMessage text={item.text} isUser={isUser} />
+          {!isUser && item.chart ? <FinanceMiniChart chart={item.chart} /> : null}
+          {!isUser && (
+            <TouchableOpacity style={styles.copyButton} onPress={() => copyMessage(item.text)}>
+              <Ionicons name="copy-outline" size={14} color={TEXT_GRAY} />
+              <Text style={styles.copyText}>Copiar</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
     );
-  }, []);
+  }, [copyMessage]);
 
   return (
     <KeyboardAvoidingView
@@ -156,22 +494,26 @@ export default function LucaScreen() {
     >
       <StatusBar barStyle="dark-content" backgroundColor="#fff" translucent />
 
-      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
-          <Ionicons name="chevron-back" size={24} color={TEXT_DARK} />
-        </TouchableOpacity>
+        {inTabs ? (
+          <View style={styles.headerSpacer} />
+        ) : (
+          <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
+            <Ionicons name="chevron-back" size={24} color={TEXT_DARK} />
+          </TouchableOpacity>
+        )}
 
         <View style={styles.headerCenter}>
           <View style={styles.onlineDot} />
           <Text style={styles.headerName}>Luca</Text>
-          <Text style={styles.headerSub}>Online</Text>
+          <Text style={styles.headerSub}>Gemini conectado</Text>
         </View>
 
-        <View style={{ width: 40 }} />
+        <View style={styles.modelBadge}>
+          <Text style={styles.modelBadgeText}>AI</Text>
+        </View>
       </View>
 
-      {/* Mensagens ou Tela inicial */}
       {!hasMessages ? (
         <View style={styles.emptyState}>
           <Image
@@ -179,8 +521,20 @@ export default function LucaScreen() {
             style={styles.logo}
             resizeMode="contain"
           />
-          <Text style={styles.greetingTitle}>Olá, {userName} 👋</Text>
-          <Text style={styles.greetingSubtitle}>Como eu posso te ajudar hoje?</Text>
+          <Text style={styles.greetingTitle}>Olá, {userName}</Text>
+          <Text style={styles.greetingSubtitle}>Posso analisar seus gastos reais e ajudar sua lista ficar mais econômica.</Text>
+
+          {historyLoading ? (
+            <View style={styles.historyNotice}>
+              <ActivityIndicator size="small" color={PRIMARY_GREEN} />
+              <Text style={styles.historyNoticeText}>Buscando histórico...</Text>
+            </View>
+          ) : historyWarning ? (
+            <View style={styles.historyNotice}>
+              <Ionicons name="cloud-offline-outline" size={16} color={TEXT_GRAY} />
+              <Text style={styles.historyNoticeText}>Histórico lento. Você já pode conversar.</Text>
+            </View>
+          ) : null}
 
           <ScrollView
             horizontal
@@ -188,7 +542,7 @@ export default function LucaScreen() {
             contentContainerStyle={styles.quickScroll}
             style={styles.quickScrollContainer}
           >
-            {QUICK_ACTIONS.map(action => (
+            {QUICK_ACTIONS.map((action) => (
               <TouchableOpacity
                 key={action.id}
                 style={styles.chip}
@@ -205,7 +559,7 @@ export default function LucaScreen() {
         <FlatList
           ref={flatListRef}
           data={messages}
-          keyExtractor={item => item.id}
+          keyExtractor={(item) => item.id}
           renderItem={renderMessage}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
@@ -218,6 +572,7 @@ export default function LucaScreen() {
                 </View>
                 <View style={[styles.bubble, styles.bubbleLuca]}>
                   <TypingDots />
+                  <Text style={styles.thinkingText}>Luca analisando seus dados...</Text>
                 </View>
               </View>
             ) : null
@@ -225,24 +580,25 @@ export default function LucaScreen() {
         />
       )}
 
-      {/* Input Area */}
-      <View style={styles.inputArea}>
+      <View style={[styles.inputArea, inTabs && styles.inputAreaWithTabs]}>
         <View style={styles.inputBox}>
           <TextInput
             style={styles.textInput}
-            placeholder="Mensagem..."
+            placeholder={user ? 'Mensagem...' : 'Faça login para conversar'}
             placeholderTextColor="#94A3B8"
             value={input}
             onChangeText={setInput}
             multiline
             maxLength={1000}
+            editable={Boolean(user) && !loading}
             onSubmitEditing={() => sendMessage(input)}
+            onKeyPress={handleInputKeyPress}
             returnKeyType="send"
           />
           <TouchableOpacity
-            style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]}
+            style={[styles.sendBtn, (!input.trim() || loading || !user) && styles.sendBtnDisabled]}
             onPress={() => sendMessage(input)}
-            disabled={!input.trim() || loading}
+            disabled={!input.trim() || loading || !user}
             activeOpacity={0.8}
           >
             {loading
@@ -251,7 +607,7 @@ export default function LucaScreen() {
             }
           </TouchableOpacity>
         </View>
-        <Text style={styles.disclaimer}>Luca pode cometer erros. Verifique informações importantes.</Text>
+        <Text style={styles.disclaimer}>Luca usa seus dados salvos no app e pode cometer erros.</Text>
       </View>
     </KeyboardAvoidingView>
   );
@@ -277,9 +633,13 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: BG_LIGHT,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  headerSpacer: {
+    width: 40,
+    height: 40,
   },
   headerCenter: {
     alignItems: 'center',
@@ -301,10 +661,31 @@ const styles = StyleSheet.create({
   headerSub: {
     fontSize: 11,
     color: '#22C55E',
-    fontWeight: '600',
+    fontWeight: '700',
   },
-
-  // Empty state
+  modelBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#DCFCE7',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modelBadgeText: {
+    color: PRIMARY_GREEN,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  loadingState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  loadingText: {
+    color: TEXT_GRAY,
+    fontWeight: '700',
+  },
   emptyState: {
     flex: 1,
     alignItems: 'center',
@@ -326,10 +707,28 @@ const styles = StyleSheet.create({
   greetingSubtitle: {
     fontSize: 16,
     color: TEXT_GRAY,
-    fontWeight: '500',
-    marginBottom: 40,
+    fontWeight: '600',
+    marginBottom: 22,
     textAlign: 'center',
     lineHeight: 24,
+    maxWidth: 330,
+  },
+  historyNotice: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: BG_LIGHT,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    marginBottom: 28,
+  },
+  historyNoticeText: {
+    color: TEXT_GRAY,
+    fontSize: 12,
+    fontWeight: '800',
   },
   quickScrollContainer: {
     flexGrow: 0,
@@ -355,8 +754,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: TEXT_DARK,
   },
-
-  // Messages
   listContent: {
     padding: 20,
     paddingBottom: 10,
@@ -366,7 +763,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
-    maxWidth: '88%',
+    maxWidth: '92%',
   },
   messageRowUser: {
     alignSelf: 'flex-end',
@@ -398,17 +795,138 @@ const styles = StyleSheet.create({
     backgroundColor: '#F1F5F9',
     borderBottomLeftRadius: 5,
   },
-  bubbleText: {
+  markdownBlock: {
+    gap: 3,
+  },
+  markdownText: {
     fontSize: 15,
     color: TEXT_DARK,
     lineHeight: 22,
     fontWeight: '500',
   },
-  bubbleTextUser: {
+  markdownTextUser: {
     color: '#fff',
   },
-
-  // Input
+  markdownBold: {
+    fontWeight: '900',
+  },
+  markdownHeading: {
+    color: TEXT_DARK,
+    fontSize: 16,
+    lineHeight: 23,
+    fontWeight: '900',
+  },
+  markdownSpacer: {
+    height: 4,
+  },
+  bulletRow: {
+    flexDirection: 'row',
+    gap: 7,
+    alignItems: 'flex-start',
+  },
+  bulletDot: {
+    color: TEXT_DARK,
+    fontSize: 15,
+    lineHeight: 22,
+    fontWeight: '900',
+  },
+  numberMarker: {
+    color: TEXT_DARK,
+    fontSize: 15,
+    lineHeight: 22,
+    fontWeight: '800',
+    minWidth: 22,
+  },
+  bulletText: {
+    flex: 1,
+  },
+  copyButton: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  copyText: {
+    color: TEXT_GRAY,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  typingDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+  },
+  typingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: PRIMARY_GREEN,
+  },
+  thinkingText: {
+    fontSize: 12,
+    color: TEXT_GRAY,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  chartCard: {
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    padding: 14,
+    marginTop: 12,
+    gap: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  chartHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+  },
+  chartTitle: {
+    color: TEXT_DARK,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  chartTotal: {
+    color: PRIMARY_GREEN,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  chartRow: {
+    gap: 5,
+  },
+  chartLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  chartLabel: {
+    color: TEXT_GRAY,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  chartValue: {
+    color: TEXT_DARK,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  chartTrack: {
+    height: 7,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  chartFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
   inputArea: {
     paddingHorizontal: 15,
     paddingTop: 10,
@@ -417,10 +935,13 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#F1F5F9',
   },
+  inputAreaWithTabs: {
+    paddingBottom: Platform.OS === 'ios' ? 112 : 92,
+  },
   inputBox: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    backgroundColor: '#F8FAFC',
+    backgroundColor: BG_LIGHT,
     borderRadius: 28,
     paddingHorizontal: 18,
     paddingVertical: 8,
@@ -436,6 +957,11 @@ const styles = StyleSheet.create({
     maxHeight: 120,
     paddingTop: Platform.OS === 'ios' ? 8 : 6,
     paddingBottom: Platform.OS === 'ios' ? 8 : 6,
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      } as any,
+    }),
   },
   sendBtn: {
     width: 40,
