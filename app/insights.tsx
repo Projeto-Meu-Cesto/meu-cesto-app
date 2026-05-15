@@ -12,7 +12,6 @@ import {
 
 const PRIMARY_GREEN = '#00C853';
 const TEXT_GRAY = '#757575';
-const BORDER_GRAY = '#F0F0F0';
 
 export default function InsightsScreen() {
   const router = useRouter();

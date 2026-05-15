@@ -4,7 +4,6 @@ const BASE_URL = 'https://api.cosmos.bluesoft.com.br';
 const DEFAULT_HEADERS: HeadersInit = {
   'X-Cosmos-Token': COSMOS_TOKEN,
   'Content-Type': 'application/json',
-  'User-Agent': 'Cosmos-API-Request',
 };
 
 // Aguarda N milissegundos
@@ -36,10 +35,7 @@ export const CATEGORY_FALLBACK_ICONS: { [key: string]: string } = {
 
 export const fetchFallbackImage = async (gtin: number): Promise<string | null> => {
   try {
-    const res = await fetch(
-      `https://world.openfoodfacts.org/api/v0/product/${gtin}.json`,
-      { headers: { 'User-Agent': 'MeuCestoApp - React Native' } }
-    );
+    const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${gtin}.json`);
     if (!res.ok) return null;
     const data = await res.json();
     const imageUrl =
@@ -54,6 +50,10 @@ export const fetchFallbackImage = async (gtin: number): Promise<string | null> =
 };
 
 export const fetchProductByGtin = async (gtin: string): Promise<CosmosProduct | null> => {
+  if (!COSMOS_TOKEN) {
+    return null;
+  }
+
   try {
     const response = await fetch(`${BASE_URL}/gtins/${gtin}.json`, {
       method: 'GET',
@@ -64,9 +64,9 @@ export const fetchProductByGtin = async (gtin: string): Promise<CosmosProduct | 
     if (!response.ok) throw new Error(`Cosmos API error: ${response.status}`);
 
     return await response.json();
-  } catch (error) {
-    console.error('Erro ao buscar produto por GTIN:', error);
-    throw error;
+  } catch {
+    console.warn('[Cosmos] Busca por GTIN indisponível. Continuando sem travar o app.');
+    return null;
   }
 };
 
@@ -76,6 +76,10 @@ export const fetchProductsByName = async (
   perPage = 30,
   retries = 3        // ← tenta até 3 vezes
 ): Promise<CosmosProduct[]> => {
+  if (!COSMOS_TOKEN) {
+    return [];
+  }
+
   const params = new URLSearchParams({
     query: name,
     page: String(page),
@@ -113,12 +117,12 @@ export const fetchProductsByName = async (
       if (Array.isArray(data)) return data;
       if (data?.products && Array.isArray(data.products)) return data.products;
 
-      console.warn('[Cosmos] Formato inesperado:', data);
-      return [];
+        console.warn('[Cosmos] Formato inesperado na busca de produtos.');
+        return [];
 
-    } catch (error) {
+    } catch {
       if (attempt === retries) {
-        console.error('Erro ao buscar produtos por nome:', error);
+        console.warn('[Cosmos] Busca de produtos indisponível. Use o cadastro manual.');
         return [];
       }
       await sleep(attempt * 1000);

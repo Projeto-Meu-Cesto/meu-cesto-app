@@ -27,9 +27,9 @@ import Animated, {
   withTiming
 } from 'react-native-reanimated';
 import { useToast } from '../context/ToastContext';
-import { auth } from '../scripts/firebaseConfig';
+import { auth, isFirebaseConfigured } from '../scripts/firebaseConfig';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const STATUS_BAR_HEIGHT = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 44;
 
 const PRIMARY_GREEN = '#00C853';
@@ -53,7 +53,7 @@ const AnimatedInput = ({
 
   useEffect(() => {
     focusAnim.value = withTiming(isFocused ? 1 : 0, { duration: 300 });
-  }, [isFocused]);
+  }, [focusAnim, isFocused]);
 
   const animatedWrapperStyle = useAnimatedStyle(() => {
     return {
@@ -142,7 +142,7 @@ export default function LoginScreen() {
       -1,
       true
     );
-  }, []);
+  }, [logoScale]);
 
   const animatedLogoStyle = useAnimatedStyle(() => ({
     transform: [{ scale: logoScale.value }],
@@ -151,6 +151,11 @@ export default function LoginScreen() {
   const handleLogin = async () => {
     if (!email || !password) {
       showToast('Preencha todos os campos', 'info');
+      return;
+    }
+
+    if (!isFirebaseConfigured) {
+      showToast('Firebase não configurado neste ambiente.', 'error');
       return;
     }
 
@@ -215,9 +220,9 @@ export default function LoginScreen() {
             <Pressable
               onPress={handleLogin}
               disabled={loading}
-              style={({ pressed, hovered }) => [
+              style={({ pressed }) => [
                 styles.button,
-                (pressed || hovered || (isFormValid && !loading)) ? styles.buttonActive : styles.buttonInactive,
+                (pressed || (isFormValid && !loading)) ? styles.buttonActive : styles.buttonInactive,
                 { transform: [{ scale: (pressed && !loading) ? 0.96 : 1 }] }
               ]}
             >
