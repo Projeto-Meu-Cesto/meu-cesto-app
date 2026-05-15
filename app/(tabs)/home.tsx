@@ -429,7 +429,7 @@ export default function HomeScreen() {
             <Text style={styles.mainCardLabel}>Gasto confirmado</Text>
             <Text style={styles.mainCardAmount}>{formatCurrency(listSummary.spent)}</Text>
             <Text style={styles.mainCardSubtitle}>
-              {listSummary.confirmed} item(ns) confirmados neste mes
+              {listSummary.confirmed} item(ns) confirmados neste mês
             </Text>
           </View>
         </View>

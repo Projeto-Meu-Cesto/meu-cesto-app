@@ -267,6 +267,30 @@ export default function StatsScreen() {
   const [menuVisible, setMenuVisible] = React.useState(false);
   const [historyVisible, setHistoryVisible] = React.useState(false);
   const [usingCache, setUsingCache] = React.useState(false);
+  const historyBackdropOpacity = React.useRef(new Animated.Value(0)).current;
+  const historySheetTranslateY = React.useRef(new Animated.Value(48)).current;
+
+  React.useEffect(() => {
+    if (!historyVisible) return;
+
+    historyBackdropOpacity.setValue(0);
+    historySheetTranslateY.setValue(48);
+
+    Animated.parallel([
+      Animated.timing(historyBackdropOpacity, {
+        toValue: 1,
+        duration: 130,
+        useNativeDriver: true,
+      }),
+      Animated.spring(historySheetTranslateY, {
+        toValue: 0,
+        damping: 20,
+        stiffness: 230,
+        mass: 0.9,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [historyBackdropOpacity, historySheetTranslateY, historyVisible]);
 
   React.useEffect(() => {
     if (!user) {
@@ -586,9 +610,13 @@ export default function StatsScreen() {
         </Pressable>
       </Modal>
 
-      <Modal transparent visible={historyVisible} animationType="slide" onRequestClose={() => setHistoryVisible(false)}>
+      <Modal transparent visible={historyVisible} animationType="none" onRequestClose={() => setHistoryVisible(false)}>
         <View style={styles.historyOverlay}>
-          <View style={styles.historySheet}>
+          <Animated.View style={[styles.historyBackdrop, { opacity: historyBackdropOpacity }]}>
+            <Pressable style={styles.historyBackdropPressable} onPress={() => setHistoryVisible(false)} />
+          </Animated.View>
+
+          <Animated.View style={[styles.historySheet, { transform: [{ translateY: historySheetTranslateY }] }]}>
             <View style={styles.historyHeader}>
               <View>
                 <Text style={styles.historyTitle}>Histórico de meses</Text>
@@ -630,7 +658,7 @@ export default function StatsScreen() {
                 );
               })}
             </ScrollView>
-          </View>
+          </Animated.View>
         </View>
       </Modal>
     </View>
@@ -1074,8 +1102,14 @@ const styles = StyleSheet.create({
   },
   historyOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.35)',
     justifyContent: 'flex-end',
+  },
+  historyBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15, 23, 42, 0.35)',
+  },
+  historyBackdropPressable: {
+    flex: 1,
   },
   historySheet: {
     backgroundColor: '#fff',
