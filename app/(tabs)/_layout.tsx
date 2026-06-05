@@ -1,7 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Tabs } from 'expo-router';
-import React from 'react';
+import { Tabs, useFocusEffect } from 'expo-router';
+import { onAuthStateChanged, type User } from 'firebase/auth';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Dimensions, Platform, StyleSheet, View } from 'react-native';
+import { AppTour } from '../../components/AppTour';
+import { takeAppTourSession } from '../../context/tourSession';
+import { auth } from '../../scripts/firebaseConfig';
+import { completeAppTour, shouldShowAppTour } from '../../scripts/tourStorage';
 
 const PRIMARY_GREEN = '#00A36C';
 const TAB_BG = '#0F172A';
@@ -10,7 +15,68 @@ const { width } = Dimensions.get('window');
 const isSmallScreen = width < 375;
 
 export default function TabLayout() {
+  const [tourVisible, setTourVisible] = useState(false);
+  const [tourUid, setTourUid] = useState<string | null>(null);
+  const tourCheckedRef = useRef(false);
+
+  const openTourIfNeeded = useCallback(async (user: User) => {
+    if (tourVisible) return;
+
+    try {
+      if (takeAppTourSession(user.uid)) {
+        setTourUid(user.uid);
+        setTourVisible(true);
+        return;
+      }
+
+      const show = await shouldShowAppTour(user.uid);
+      if (show) {
+        setTourUid(user.uid);
+        setTourVisible(true);
+      }
+    } catch (error) {
+      console.warn('[Tour] Não foi possível verificar status do tour.', error);
+    }
+  }, [tourVisible]);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        setTourVisible(false);
+        setTourUid(null);
+        tourCheckedRef.current = false;
+        return;
+      }
+
+      await openTourIfNeeded(user);
+      tourCheckedRef.current = true;
+    });
+
+    return unsub;
+  }, [openTourIfNeeded]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const user = auth.currentUser;
+      if (!user) return;
+
+      const retry = setTimeout(() => {
+        openTourIfNeeded(user);
+      }, tourCheckedRef.current ? 500 : 100);
+
+      return () => clearTimeout(retry);
+    }, [openTourIfNeeded])
+  );
+
+  const handleTourFinish = useCallback(async () => {
+    setTourVisible(false);
+    if (tourUid) {
+      await completeAppTour(tourUid);
+    }
+  }, [tourUid]);
+
   return (
+    <>
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: PRIMARY_GREEN,
@@ -122,6 +188,8 @@ export default function TabLayout() {
         }}
       />
     </Tabs>
+    <AppTour visible={tourVisible} onFinish={handleTourFinish} />
+    </>
   );
 }
 

@@ -8,8 +8,15 @@
     "scheme": "meucesto",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "notification": {
+      "icon": "./assets/images/Meu-Cesto-Logo.png",
+      "color": "#00A36C"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "O Meu Cesto usa sua localização para filtrar produtos e preços disponíveis na sua região."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -18,6 +25,10 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ],
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
@@ -39,7 +50,13 @@
           }
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "O Meu Cesto usa sua localização para filtrar produtos e preços disponíveis na sua região."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

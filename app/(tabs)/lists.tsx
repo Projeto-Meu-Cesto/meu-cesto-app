@@ -21,16 +21,20 @@ import {
 } from 'react-native';
 import { auth, db } from '../../scripts/firebaseConfig';
 import { cacheFinalizedPurchase } from '../../scripts/financeContext';
+import { useToast } from '../../context/ToastContext';
+import { PRIMARY_GREEN, BG_LIGHT, TEXT_DARK, TEXT_GRAY, DANGER, STATUS_BAR_HEIGHT } from '../../constants/theme';
+import {
+  parseMoney,
+  getQuantity,
+  getItemTotal,
+  formatCurrency,
+  normalizePriceTyping,
+  normalizePriceForStorage,
+  normalizeQuantityTyping,
+  formatPriceForInput,
+  wait
+} from '../../scripts/utils';
 
-const STATUS_BAR_HEIGHT = Platform.OS === 'android'
-  ? (StatusBar.currentHeight ?? 24)
-  : 54;
-
-const PRIMARY_GREEN = '#00A36C';
-const BG_LIGHT = '#F8FAFC';
-const TEXT_DARK = '#1E293B';
-const TEXT_GRAY = '#64748B';
-const DANGER = '#EF4444';
 const LIST_LOAD_TIMEOUT_MS = 4500;
 const WRITE_TIMEOUT_MS = 1400;
 
@@ -48,78 +52,11 @@ type ShoppingListItem = {
 
 type PriceModalMode = 'check' | 'mark-all' | 'finalize-checked' | 'finalize-all';
 
-function parseMoney(value: string | number | undefined) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
-  if (!value) return 0;
-
-  const normalized = value
-    .replace(/[^\d,.-]/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.');
-
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function getQuantity(value: string | number | undefined) {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0 ? value : 1;
-  }
-
-  const parsed = Number.parseInt(String(value || '1'), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
-}
-
-function getItemTotal(item: Pick<ShoppingListItem, 'price' | 'quantity'>) {
-  return parseMoney(item.price) * getQuantity(item.quantity);
-}
-
-function formatCurrency(value: number) {
-  return value.toLocaleString('pt-BR', {
-    style: 'currency',
-    currency: 'BRL',
-  });
-}
-
-function normalizePriceTyping(value: string) {
-  const clean = value.replace(/[^\d,.]/g, '').replace(/\./g, ',');
-  const [whole, ...decimalParts] = clean.split(',');
-
-  if (decimalParts.length === 0) {
-    return whole;
-  }
-
-  return `${whole},${decimalParts.join('').slice(0, 2)}`;
-}
-
-function normalizePriceForStorage(value: string) {
-  const normalized = value
-    .replace(/[^\d,.-]/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.');
-
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) && parsed > 0
-    ? parsed.toFixed(2).replace('.', ',')
-    : '';
-}
-
-function normalizeQuantityTyping(value: string) {
-  return value.replace(/[^\d]/g, '').slice(0, 3);
-}
-
-function formatPriceForInput(value: string | number | undefined) {
-  const amount = parseMoney(value);
-  return amount > 0 ? amount.toFixed(2).replace('.', ',') : '';
-}
-
 function findFirstMissingPrice(itemsToCheck: ShoppingListItem[]) {
   return itemsToCheck.find((item) => parseMoney(item.price) <= 0);
 }
 
-function wait(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+
 
 // — Skeleton Loader —
 function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
@@ -172,10 +109,13 @@ export default function ListsScreen() {
   const [priceSaving, setPriceSaving] = useState(false);
   const router = useRouter();
   const user = auth.currentUser;
+  const { showToast } = useToast();
 
   const onRefresh = React.useCallback(() => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1500);
+    // Para recarregar os dados, invalide os caches se existirem.
+    // Aqui usamos timeout curto mas o Firebase trata o background sync
+    setTimeout(() => setRefreshing(false), 800);
   }, []);
 
   useEffect(() => {
@@ -297,11 +237,23 @@ export default function ListsScreen() {
 
   const handleDelete = async (itemId: string) => {
     if (!user) return;
+    
+    // Optimistic Update: guarda o item caso dê erro
+    const itemToRestore = items.find(i => i.id === itemId);
+    if (!itemToRestore) return;
+    
+    // Remove localmente antes de terminar na rede
+    removeLocalItems([itemId]);
+    
     try {
       const itemRef = doc(db, 'users', user.uid, 'shopping_list', itemId);
       await deleteDoc(itemRef);
+      // Sucesso silenciado, a UI já reagiu.
     } catch (error) {
       console.error("Erro ao deletar item:", error);
+      Alert.alert('Erro', 'Não foi possível excluir o item. Tente novamente.');
+      // Rollback: restaura o item na UI
+      setItems(prev => [itemToRestore, ...prev]);
     }
   };
 
@@ -443,6 +395,7 @@ export default function ListsScreen() {
 
       if (result !== 'failed') {
         removeLocalItems(targetItems.map((item) => item.id));
+        showToast('Compra finalizada com sucesso!', 'success'); // BUG FIX #10
       }
 
       if (result === 'failed') {

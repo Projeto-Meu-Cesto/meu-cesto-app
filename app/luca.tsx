@@ -1,25 +1,30 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { addDoc, collection, getDocs, limit, orderBy, query, serverTimestamp, setDoc, doc } from 'firebase/firestore';
+import { addDoc, collection, deleteDoc, doc, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
+  Easing,
   FlatList,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View,
 } from 'react-native';
-import { getLucaResponse, LucaHistoryItem, LUCA_MODELS } from '../scripts/aiService';
+import { getLucaResponse, LUCA_MODELS, LucaHistoryItem } from '../scripts/aiService';
 import { FinanceContext, getUserFinanceContext, shouldAttachFinanceChart } from '../scripts/financeContext';
 import { auth, db } from '../scripts/firebaseConfig';
 
@@ -247,17 +252,107 @@ function FinanceMiniChart({ chart }: { chart: MessageChart }) {
   );
 }
 
+const MAX_CHATS_LIMIT = 8;
+const MAX_MESSAGES_LIMIT = 20;
+
+function SkeletonItem({ width, height, style }: { width: any; height: number; style?: any }) {
+  const opacity = useRef(new Animated.Value(0.3)).current;
+
+  React.useEffect(() => {
+    const anim = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, {
+          toValue: 0.7,
+          duration: 800,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 0.3,
+          duration: 800,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    anim.start();
+    return () => anim.stop();
+  }, [opacity]);
+
+  return (
+    <Animated.View
+      style={[
+        {
+          width,
+          height,
+          backgroundColor: '#E2E8F0',
+          borderRadius: 12,
+          opacity,
+        },
+        style,
+      ]}
+    />
+  );
+}
+
+function ChatSkeleton() {
+  return (
+    <View style={{ flex: 1, padding: 20, gap: 16 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 8, maxWidth: '80%' }}>
+        <View style={[styles.avatarMini, { backgroundColor: '#E2E8F0' }]} />
+        <SkeletonItem width="60%" height={40} style={{ borderBottomLeftRadius: 4 }} />
+      </View>
+      <View style={{ flexDirection: 'row-reverse', alignItems: 'flex-end', gap: 8, maxWidth: '80%', alignSelf: 'flex-end' }}>
+        <SkeletonItem width="70%" height={60} style={{ borderBottomRightRadius: 4, backgroundColor: '#D1FAE5' }} />
+      </View>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 8, maxWidth: '80%' }}>
+        <View style={[styles.avatarMini, { backgroundColor: '#E2E8F0' }]} />
+        <SkeletonItem width="80%" height={85} style={{ borderBottomLeftRadius: 4 }} />
+      </View>
+      <View style={{ flexDirection: 'row-reverse', alignItems: 'flex-end', gap: 8, maxWidth: '80%', alignSelf: 'flex-end' }}>
+        <SkeletonItem width="50%" height={45} style={{ borderBottomRightRadius: 4, backgroundColor: '#D1FAE5' }} />
+      </View>
+    </View>
+  );
+}
+
 export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(auth.currentUser);
   const [authReady, setAuthReady] = useState(Boolean(auth.currentUser));
   const userUid = user?.uid;
   const userName = user?.displayName?.split(' ')[0] || 'amigo';
+
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [chats, setChats] = useState<any[]>([]);
+  const [chatsLoading, setChatsLoading] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerAnimation = useRef(new Animated.Value(-Dimensions.get('window').width * 0.78)).current;
+  const backdropOpacity = useRef(new Animated.Value(0)).current;
+
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  React.useEffect(() => {
+    const showSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardVisible(true)
+    );
+    const hideSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardVisible(false)
+    );
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
   const messagesPath = React.useMemo(
-    () => userUid
-      ? collection(db, 'users', userUid, 'luca_chats', DEFAULT_CHAT_ID, 'messages')
+    () => userUid && activeChatId
+      ? collection(db, 'users', userUid, 'luca_chats', activeChatId, 'messages')
       : null,
-    [userUid]
+    [userUid, activeChatId]
   );
 
   const [input, setInput] = useState('');
@@ -265,10 +360,17 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyWarning, setHistoryWarning] = useState(false);
-  const flatListRef = useRef<FlatList<Message>>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Typing effect states
+  const [currentlyTypingId, setCurrentlyTypingId] = useState<string | null>(null);
+  const [typingText, setTypingText] = useState('');
+  const typingIntervalRef = useRef<any>(null);
+
+  const flatListRef = useRef<FlatList<Message>>(null);
   const hasMessages = messages.length > 0;
 
+  // Listen to auth changes
   React.useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
@@ -282,6 +384,56 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
     return unsubscribe;
   }, [router]);
 
+  // Listen to chats list in real-time
+  React.useEffect(() => {
+    if (!authReady || !user) {
+      setChatsLoading(false);
+      return;
+    }
+
+    setChatsLoading(true);
+    const chatsQuery = query(
+      collection(db, 'users', user.uid, 'luca_chats'),
+      orderBy('updatedAt', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(chatsQuery, (snapshot) => {
+      const loadedChats = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      })) as any[];
+
+      setChats(loadedChats);
+      setChatsLoading(false);
+
+      if (loadedChats.length > 0) {
+        if (!activeChatId) {
+          setActiveChatId(loadedChats[0].id);
+        }
+      } else {
+        createFirstChat(user.uid);
+      }
+    }, (error) => {
+      console.error('[Luca] Erro ao sincronizar chats:', error);
+      setChatsLoading(false);
+    });
+
+    return unsubscribe;
+  }, [authReady, user, activeChatId]);
+
+  const createFirstChat = async (uid: string) => {
+    try {
+      const newDoc = await addDoc(collection(db, 'users', uid, 'luca_chats'), {
+        title: 'Conversa Principal',
+        updatedAt: serverTimestamp(),
+      });
+      setActiveChatId(newDoc.id);
+    } catch (e) {
+      console.error('[Luca] Erro ao criar primeiro chat:', e);
+    }
+  };
+
+  // Load message history when activeChatId or messagesPath changes
   React.useEffect(() => {
     if (!authReady) return;
 
@@ -336,13 +488,53 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
     }
   }, [historyLoading]);
 
+  // Clean up typing animation interval
+  React.useEffect(() => {
+    return () => {
+      if (typingIntervalRef.current) {
+        clearInterval(typingIntervalRef.current);
+      }
+    };
+  }, []);
+
+  const simulateTyping = useCallback((fullText: string, lucaMsgId: string, onComplete: () => void) => {
+    setCurrentlyTypingId(lucaMsgId);
+    setTypingText('');
+
+    const words = fullText.split(' ');
+    let currentWordIndex = 0;
+    let currentText = '';
+
+    if (typingIntervalRef.current) {
+      clearInterval(typingIntervalRef.current);
+    }
+
+    typingIntervalRef.current = setInterval(() => {
+      if (currentWordIndex < words.length) {
+        currentText += (currentWordIndex === 0 ? '' : ' ') + words[currentWordIndex];
+        setTypingText(currentText);
+        currentWordIndex++;
+        setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 30);
+      } else {
+        clearInterval(typingIntervalRef.current);
+        setCurrentlyTypingId(null);
+        setTypingText('');
+        onComplete();
+      }
+    }, 45);
+  }, []);
+
   const saveMessage = useCallback(async (message: Omit<Message, 'id'>) => {
-    if (!user || !messagesPath) return;
+    if (!user || !activeChatId || !messagesPath) return;
+
+    const isFirstUserMessage = message.sender === 'user' && messages.length === 0;
 
     await setDoc(
-      doc(db, 'users', user.uid, 'luca_chats', DEFAULT_CHAT_ID),
+      doc(db, 'users', user.uid, 'luca_chats', activeChatId),
       {
-        title: 'Conversa principal',
+        title: isFirstUserMessage
+          ? (message.text.length > 25 ? message.text.slice(0, 22) + '...' : message.text)
+          : (chats.find(c => c.id === activeChatId)?.title || 'Conversa'),
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -352,7 +544,7 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
       ...message,
       createdAt: serverTimestamp(),
     });
-  }, [messagesPath, user]);
+  }, [messagesPath, activeChatId, user, messages.length, chats]);
 
   const copyMessage = useCallback(async (text: string) => {
     try {
@@ -370,7 +562,15 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
   const sendMessage = useCallback(async (textToSend: string) => {
     const cleanText = textToSend.trim();
-    if (!cleanText || loading || !user) return;
+    if (!cleanText || loading || !user || !activeChatId) return;
+
+    if (messages.length >= MAX_MESSAGES_LIMIT) {
+      Alert.alert(
+        'Limite de Conversa Atingido',
+        'Esta conversa atingiu o limite de 20 mensagens. Crie uma nova conversa para continuar.'
+      );
+      return;
+    }
 
     setInput('');
     setLoading(true);
@@ -407,9 +607,11 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
         model: LUCA_MODELS.primary,
       });
 
+      const lucaMsgId = `local-luca-${Date.now()}`;
+
       const lucaMsg: Message = {
-        id: `local-luca-${Date.now()}`,
-        text: responseText,
+        id: lucaMsgId,
+        text: '',
         sender: 'luca',
         model: LUCA_MODELS.primary,
         chart: financeContext && shouldAttachFinanceChart(cleanText, financeContext) ? buildChart(financeContext) : null,
@@ -418,12 +620,21 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
       setMessages((prev) => [...prev, lucaMsg]);
 
-      saveMessage({
-        text: lucaMsg.text,
-        sender: lucaMsg.sender,
-        model: lucaMsg.model,
-        chart: lucaMsg.chart,
-      }).catch((error) => console.warn('[Luca] Resposta do Luca não foi salva ainda:', error));
+      simulateTyping(responseText, lucaMsgId, () => {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === lucaMsgId ? { ...msg, text: responseText } : msg
+          )
+        );
+
+        saveMessage({
+          text: responseText,
+          sender: 'luca',
+          model: lucaMsg.model,
+          chart: lucaMsg.chart,
+        }).catch((error) => console.warn('[Luca] Resposta do Luca não foi salva ainda:', error));
+      });
+
     } catch (err) {
       console.error('[Luca] Erro:', err);
       const errorMsg: Message = {
@@ -445,7 +656,114 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
       setLoading(false);
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 120);
     }
-  }, [loading, messages, saveMessage, user]);
+  }, [loading, messages, saveMessage, user, activeChatId, simulateTyping]);
+
+  const handleRefresh = useCallback(async () => {
+    if (!messagesPath) return;
+    try {
+      setIsRefreshing(true);
+      const historyQuery = query(messagesPath, orderBy('createdAt', 'desc'), limit(30));
+      const snapshot = await getDocs(historyQuery);
+      const loaded = snapshot.docs.map((messageDoc) => ({
+        id: messageDoc.id,
+        ...messageDoc.data(),
+      })) as Message[];
+      setMessages(loaded.reverse());
+    } catch (error) {
+      console.error('[Luca] Erro ao atualizar mensagens:', error);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [messagesPath]);
+
+  const handleCreateNewChat = async () => {
+    if (!user) return;
+    if (chats.length >= MAX_CHATS_LIMIT) {
+      Alert.alert(
+        'Limite de Chats Atingido',
+        `Você atingiu o limite máximo de ${MAX_CHATS_LIMIT} chats ativos. Por favor, exclua uma conversa antiga antes de criar uma nova.`
+      );
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const newDoc = await addDoc(collection(db, 'users', user.uid, 'luca_chats'), {
+        title: `Nova conversa ${chats.length + 1}`,
+        updatedAt: serverTimestamp(),
+      });
+      setActiveChatId(newDoc.id);
+      setMessages([]);
+      toggleDrawer(false);
+    } catch (e) {
+      Alert.alert('Erro', 'Não foi possível criar uma nova conversa.');
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteChat = (chatId: string, chatTitle: string) => {
+    if (!user) return;
+    Alert.alert(
+      'Excluir Conversa',
+      `Tem certeza que deseja excluir permanentemente a conversa "${chatTitle}"?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Excluir',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteDoc(doc(db, 'users', user.uid, 'luca_chats', chatId));
+              if (activeChatId === chatId) {
+                setActiveChatId(null);
+                setMessages([]);
+              }
+            } catch (error) {
+              console.error('[Luca] Erro ao excluir chat:', error);
+              Alert.alert('Erro', 'Não foi possível excluir a conversa.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const toggleDrawer = (open: boolean) => {
+    if (open) {
+      setDrawerOpen(true);
+      setTimeout(() => {
+        Animated.parallel([
+          Animated.timing(drawerAnimation, {
+            toValue: 0,
+            duration: 250,
+            useNativeDriver: true,
+          }),
+          Animated.timing(backdropOpacity, {
+            toValue: 1,
+            duration: 250,
+            useNativeDriver: true,
+          })
+        ]).start();
+      }, 10);
+    } else {
+      Animated.parallel([
+        Animated.timing(drawerAnimation, {
+          toValue: -Dimensions.get('window').width * 0.78,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backdropOpacity, {
+          toValue: 0,
+          duration: 200,
+          useNativeDriver: true,
+        })
+      ]).start(() => {
+        setDrawerOpen(false);
+      });
+    }
+  };
 
   const handleInputKeyPress = useCallback((event: any) => {
     if (Platform.OS !== 'web') return;
@@ -463,6 +781,7 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
   const renderMessage = useCallback(({ item }: { item: Message }) => {
     const isUser = item.sender === 'user';
+    const textToShow = item.id === currentlyTypingId ? (typingText || '') + ' ▊' : item.text;
 
     return (
       <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowLuca]}>
@@ -473,7 +792,7 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
         )}
 
         <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleLuca]}>
-          <MarkdownMessage text={item.text} isUser={isUser} />
+          <MarkdownMessage text={textToShow} isUser={isUser} />
           {!isUser && item.chart ? <FinanceMiniChart chart={item.chart} /> : null}
           {!isUser && (
             <TouchableOpacity style={styles.copyButton} onPress={() => copyMessage(item.text)}>
@@ -484,7 +803,7 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
         </View>
       </View>
     );
-  }, [copyMessage]);
+  }, [copyMessage, currentlyTypingId, typingText]);
 
   return (
     <KeyboardAvoidingView
@@ -496,65 +815,68 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
       <View style={styles.header}>
         {inTabs ? (
-          <View style={styles.headerSpacer} />
+          <TouchableOpacity onPress={() => toggleDrawer(true)} style={styles.headerBtn}>
+            <Ionicons name="menu-outline" size={24} color={TEXT_DARK} />
+          </TouchableOpacity>
         ) : (
           <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
             <Ionicons name="chevron-back" size={24} color={TEXT_DARK} />
           </TouchableOpacity>
         )}
-
-        <View style={styles.headerCenter}>
-          <View style={styles.onlineDot} />
-          <Text style={styles.headerName}>Luca</Text>
-          <Text style={styles.headerSub}>Gemini conectado</Text>
-        </View>
-
-        <View style={styles.modelBadge}>
-          <Text style={styles.modelBadgeText}>AI</Text>
-        </View>
       </View>
 
-      {!hasMessages ? (
-        <View style={styles.emptyState}>
-          <Image
-            source={require('../assets/images/Meu-Cesto-Logo.png')}
-            style={styles.logo}
-            resizeMode="contain"
-          />
-          <Text style={styles.greetingTitle}>Olá, {userName}</Text>
-          <Text style={styles.greetingSubtitle}>Posso analisar seus gastos reais e ajudar sua lista ficar mais econômica.</Text>
+      {historyLoading ? (
+        <ChatSkeleton />
+      ) : !hasMessages ? (
+        <ScrollView
+          contentContainerStyle={[styles.emptyStateScroll, inTabs && { paddingBottom: keyboardVisible ? 20 : 100 }]}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={handleRefresh}
+              colors={[PRIMARY_GREEN]}
+              tintColor={PRIMARY_GREEN}
+              progressViewOffset={30}
+            />
+          }
+        >
+          <View style={styles.emptyStateInner}>
+            <Image
+              source={require('../assets/images/Meu-Cesto-Logo.png')}
+              style={styles.logo}
+              resizeMode="contain"
+            />
+            <Text style={styles.greetingTitle}>Olá, {userName}</Text>
+            <Text style={styles.greetingSubtitle}>Posso analisar seus gastos reais e ajudar sua lista ficar mais econômica.</Text>
 
-          {historyLoading ? (
-            <View style={styles.historyNotice}>
-              <ActivityIndicator size="small" color={PRIMARY_GREEN} />
-              <Text style={styles.historyNoticeText}>Buscando histórico...</Text>
-            </View>
-          ) : historyWarning ? (
-            <View style={styles.historyNotice}>
-              <Ionicons name="cloud-offline-outline" size={16} color={TEXT_GRAY} />
-              <Text style={styles.historyNoticeText}>Histórico lento. Você já pode conversar.</Text>
-            </View>
-          ) : null}
+            {historyWarning ? (
+              <View style={styles.historyNotice}>
+                <Ionicons name="cloud-offline-outline" size={16} color={TEXT_GRAY} />
+                <Text style={styles.historyNoticeText}>Histórico lento. Você já pode conversar.</Text>
+              </View>
+            ) : null}
 
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.quickScroll}
-            style={styles.quickScrollContainer}
-          >
-            {QUICK_ACTIONS.map((action) => (
-              <TouchableOpacity
-                key={action.id}
-                style={styles.chip}
-                onPress={() => sendMessage(action.label)}
-                activeOpacity={0.7}
-              >
-                <Ionicons name={action.icon as any} size={16} color={PRIMARY_GREEN} />
-                <Text style={styles.chipText}>{action.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.quickScroll}
+              style={styles.quickScrollContainer}
+            >
+              {QUICK_ACTIONS.map((action) => (
+                <TouchableOpacity
+                  key={action.id}
+                  style={styles.chip}
+                  onPress={() => sendMessage(action.label)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name={action.icon as any} size={16} color={PRIMARY_GREEN} />
+                  <Text style={styles.chipText}>{action.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </ScrollView>
       ) : (
         <FlatList
           ref={flatListRef}
@@ -564,6 +886,14 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
           onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+          refreshControl={
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={handleRefresh}
+              colors={[PRIMARY_GREEN]}
+              tintColor={PRIMARY_GREEN}
+            />
+          }
           ListFooterComponent={
             loading ? (
               <View style={[styles.messageRow, styles.messageRowLuca]}>
@@ -580,25 +910,57 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
         />
       )}
 
-      <View style={[styles.inputArea, inTabs && styles.inputAreaWithTabs]}>
+      <View style={[styles.inputArea, (inTabs && !keyboardVisible) && styles.inputAreaWithTabs]}>
+        {/* Messages Limit Badge */}
+        {messages.length >= 16 && (
+          <View style={[
+            styles.limitBadge,
+            messages.length >= MAX_MESSAGES_LIMIT ? styles.limitBadgeBlocked : styles.limitBadgeWarning
+          ]}>
+            <Ionicons
+              name={messages.length >= MAX_MESSAGES_LIMIT ? 'lock-closed-outline' : 'warning-outline'}
+              size={12}
+              color={messages.length >= MAX_MESSAGES_LIMIT ? '#EF4444' : '#D97706'}
+            />
+            <Text style={[
+              styles.limitBadgeText,
+              messages.length >= MAX_MESSAGES_LIMIT ? styles.limitBadgeTextBlocked : styles.limitBadgeTextWarning
+            ]}>
+              {messages.length >= MAX_MESSAGES_LIMIT
+                ? 'Limite de 20 mensagens atingido. Comece outro chat!'
+                : `Atenção: resta(m) ${MAX_MESSAGES_LIMIT - messages.length} mensagem(ns) nesta conversa.`
+              }
+            </Text>
+          </View>
+        )}
+
         <View style={styles.inputBox}>
           <TextInput
             style={styles.textInput}
-            placeholder={user ? 'Mensagem...' : 'Faça login para conversar'}
+            placeholder={
+              !user
+                ? 'Faça login para conversar'
+                : messages.length >= MAX_MESSAGES_LIMIT
+                  ? 'Limite atingido nesta conversa'
+                  : 'Mensagem...'
+            }
             placeholderTextColor="#94A3B8"
             value={input}
             onChangeText={setInput}
             multiline
             maxLength={1000}
-            editable={Boolean(user) && !loading}
+            editable={Boolean(user) && !loading && messages.length < MAX_MESSAGES_LIMIT}
             onSubmitEditing={() => sendMessage(input)}
             onKeyPress={handleInputKeyPress}
             returnKeyType="send"
           />
           <TouchableOpacity
-            style={[styles.sendBtn, (!input.trim() || loading || !user) && styles.sendBtnDisabled]}
+            style={[
+              styles.sendBtn,
+              (!input.trim() || loading || !user || messages.length >= MAX_MESSAGES_LIMIT) && styles.sendBtnDisabled
+            ]}
             onPress={() => sendMessage(input)}
-            disabled={!input.trim() || loading || !user}
+            disabled={!input.trim() || loading || !user || messages.length >= MAX_MESSAGES_LIMIT}
             activeOpacity={0.8}
           >
             {loading
@@ -609,6 +971,95 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
         </View>
         <Text style={styles.disclaimer}>Luca usa seus dados salvos no app e pode cometer erros.</Text>
       </View>
+
+      {/* Side Menu Drawer */}
+      {drawerOpen && (
+        <View style={[StyleSheet.absoluteFillObject, { zIndex: 1000 }]}>
+          <TouchableWithoutFeedback onPress={() => toggleDrawer(false)}>
+            <Animated.View style={[styles.drawerBackdrop, { opacity: backdropOpacity }]} />
+          </TouchableWithoutFeedback>
+          <Animated.View
+            style={[
+              styles.drawerContainer,
+              {
+                transform: [{ translateX: drawerAnimation }],
+              },
+            ]}
+          >
+            <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
+              <View style={{ flex: 1 }}>
+                {/* Drawer Header */}
+                <View style={styles.drawerHeader}>
+                  <Text style={styles.drawerTitle}>Conversas Luca</Text>
+                  <TouchableOpacity onPress={() => toggleDrawer(false)}>
+                    <Ionicons name="close" size={24} color={TEXT_DARK} />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Create New Chat Button */}
+                <TouchableOpacity
+                  style={styles.newChatBtn}
+                  onPress={handleCreateNewChat}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="add-circle-outline" size={20} color="#fff" />
+                  <Text style={styles.newChatBtnText}>Nova Conversa</Text>
+                  <Text style={styles.chatCountBadge}>{chats.length}/{MAX_CHATS_LIMIT}</Text>
+                </TouchableOpacity>
+
+                {/* Chats List */}
+                {chatsLoading ? (
+                  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color={PRIMARY_GREEN} />
+                  </View>
+                ) : (
+                  <ScrollView contentContainerStyle={styles.drawerScroll} showsVerticalScrollIndicator={false}>
+                    {chats.map((chat) => {
+                      const isActive = chat.id === activeChatId;
+                      return (
+                        <TouchableOpacity
+                          key={chat.id}
+                          style={[styles.chatListItem, isActive && styles.chatListItemActive]}
+                          onPress={() => {
+                            setActiveChatId(chat.id);
+                            toggleDrawer(false);
+                          }}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons
+                            name="chatbubble-ellipses-outline"
+                            size={18}
+                            color={isActive ? PRIMARY_GREEN : TEXT_GRAY}
+                          />
+                          <Text
+                            style={[styles.chatListItemText, isActive && styles.chatListItemTextActive]}
+                            numberOfLines={1}
+                          >
+                            {chat.title || 'Conversa'}
+                          </Text>
+
+                          <TouchableOpacity
+                            onPress={() => handleDeleteChat(chat.id, chat.title || 'Conversa')}
+                            style={styles.deleteChatBtn}
+                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                          >
+                            <Ionicons name="trash-outline" size={16} color="#EF4444" />
+                          </TouchableOpacity>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+
+                {/* Drawer Footer */}
+                <View style={styles.drawerFooter}>
+                  <Text style={styles.drawerFooterText}>Meu Cesto App • Luca AI</Text>
+                </View>
+              </View>
+            </TouchableWithoutFeedback>
+          </Animated.View>
+        </View>
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -688,6 +1139,16 @@ const styles = StyleSheet.create({
   },
   emptyState: {
     flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  emptyStateScroll: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
+  emptyStateInner: {
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 20,
@@ -981,5 +1442,139 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 8,
     fontWeight: '500',
+  },
+  drawerBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+  },
+  drawerContainer: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: Dimensions.get('window').width * 0.78,
+    backgroundColor: '#fff',
+    borderTopRightRadius: 24,
+    borderBottomRightRadius: 24,
+    paddingTop: Platform.OS === 'ios' ? 60 : 40,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 4, height: 0 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 24,
+    zIndex: 110,
+  },
+  drawerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    marginBottom: 20,
+  },
+  drawerTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: TEXT_DARK,
+  },
+  newChatBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: PRIMARY_GREEN,
+    marginHorizontal: 15,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 16,
+    gap: 10,
+    marginBottom: 16,
+    shadowColor: PRIMARY_GREEN,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  newChatBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+    flex: 1,
+  },
+  chatCountBadge: {
+    color: '#fff',
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    paddingVertical: 2,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  drawerScroll: {
+    paddingHorizontal: 10,
+    paddingBottom: 20,
+    gap: 8,
+  },
+  chatListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    gap: 10,
+    backgroundColor: 'transparent',
+  },
+  chatListItemActive: {
+    backgroundColor: '#ECFDF5',
+  },
+  chatListItemText: {
+    flex: 1,
+    fontSize: 14,
+    color: TEXT_GRAY,
+    fontWeight: '600',
+  },
+  chatListItemTextActive: {
+    color: PRIMARY_GREEN,
+    fontWeight: '800',
+  },
+  deleteChatBtn: {
+    padding: 4,
+  },
+  drawerFooter: {
+    paddingTop: 15,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    alignItems: 'center',
+    marginHorizontal: 20,
+    marginTop: 'auto',
+  },
+  drawerFooterText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    fontWeight: '600',
+  },
+  limitBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginBottom: 8,
+    alignSelf: 'center',
+  },
+  limitBadgeWarning: {
+    backgroundColor: '#FEF3C7',
+  },
+  limitBadgeBlocked: {
+    backgroundColor: '#FEE2E2',
+  },
+  limitBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  limitBadgeTextWarning: {
+    color: '#D97706',
+  },
+  limitBadgeTextBlocked: {
+    color: '#DC2626',
   },
 });

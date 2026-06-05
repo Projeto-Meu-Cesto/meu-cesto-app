@@ -1,120 +1,29 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
+import React, { useState } from 'react';
 import {
-  KeyboardAvoidingView,
-  Platform,
+  ActivityIndicator,
   Pressable,
-  ScrollView,
-  StatusBar,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
-  ActivityIndicator,
 } from 'react-native';
-import Animated, {
-  interpolateColor,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-  withTiming
-} from 'react-native-reanimated';
-import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { auth, isFirebaseConfigured } from '../scripts/firebaseConfig';
+import { AuthAnimatedInput } from '../components/auth/AuthAnimatedInput';
+import { AuthScreenShell } from '../components/auth/AuthScreenShell';
+import { isPasswordValid, PasswordRequirements } from '../components/auth/PasswordRequirements';
+import {
+  AUTH_BUTTON_GRAY,
+  AUTH_MIN_PASSWORD_LENGTH,
+  AUTH_PRIMARY_GREEN,
+  AUTH_TEXT_GRAY,
+} from '../components/auth/authTheme';
+import { useAuthLayout } from '../components/auth/useAuthLayout';
+import { requestAppTourSession } from '../context/tourSession';
 import { useToast } from '../context/ToastContext';
-
-const PRIMARY_GREEN = '#00C853';
-const TEXT_GRAY = '#757575';
-const BORDER_GRAY = '#E0E0E0';
-const BUTTON_GRAY = '#B0B0B0';
-
-const AnimatedInput = ({
-  label,
-  icon,
-  value,
-  onChangeText,
-  placeholder,
-  secureTextEntry,
-  autoCapitalize = 'none' as any
-}: any) => {
-  const [isFocused, setIsFocused] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
-
-  const focusAnim = useSharedValue(0);
-
-  useEffect(() => {
-    focusAnim.value = withTiming(isFocused ? 1 : 0, { duration: 300 });
-  }, [focusAnim, isFocused]);
-
-  const animatedWrapperStyle = useAnimatedStyle(() => {
-    return {
-      borderColor: interpolateColor(
-        focusAnim.value,
-        [0, 1],
-        [BORDER_GRAY, PRIMARY_GREEN]
-      ),
-      borderWidth: withTiming(isFocused ? 2 : 1.5),
-      transform: [{ scale: withSpring(isFocused ? 1.02 : 1) }],
-      backgroundColor: interpolateColor(
-        focusAnim.value,
-        [0, 1],
-        ['#FAFAFA', '#FFFFFF']
-      ),
-      shadowOpacity: withTiming(isFocused ? 0.15 : 0),
-      elevation: withTiming(isFocused ? 4 : 0),
-    };
-  });
-
-  const animatedIconStyle = useAnimatedStyle(() => {
-    return {
-      color: interpolateColor(
-        focusAnim.value,
-        [0, 1],
-        [TEXT_GRAY, PRIMARY_GREEN]
-      ),
-    };
-  });
-
-  return (
-    <View style={styles.inputGroup}>
-      <Text style={[
-        styles.label,
-        { color: isFocused ? PRIMARY_GREEN : TEXT_GRAY }
-      ]}>
-        {label}
-      </Text>
-      <Animated.View style={[styles.inputWrapper, animatedWrapperStyle]}>
-        <Animated.Text style={animatedIconStyle}>
-          <Ionicons name={icon} size={22} style={styles.inputIcon} />
-        </Animated.Text>
-
-        <TextInput
-          style={[styles.input, Platform.OS === 'web' && { outlineStyle: 'none' } as any]}
-          placeholder={placeholder}
-          placeholderTextColor="#BBB"
-          value={value}
-          onChangeText={onChangeText}
-          autoCapitalize={autoCapitalize}
-          secureTextEntry={secureTextEntry && !showPassword}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
-        />
-
-        {secureTextEntry && (
-          <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
-            <Ionicons
-              name={showPassword ? 'eye-off-outline' : 'eye-outline'}
-              size={22}
-              color={TEXT_GRAY}
-            />
-          </TouchableOpacity>
-        )}
-      </Animated.View>
-    </View>
-  );
-};
+import { auth, isFirebaseConfigured } from '../scripts/firebaseConfig';
+import { markAppTourPending } from '../scripts/tourStorage';
 
 export default function RegisterScreen() {
   const [name, setName] = useState('');
@@ -124,15 +33,28 @@ export default function RegisterScreen() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const { showToast } = useToast();
+  const layout = useAuthLayout();
 
   const handleRegister = async () => {
-    if (!name || !email || !password || !confirmPassword) {
+    const cleanName = name.trim();
+    const cleanEmail = email.trim();
+
+    if (!cleanName || !cleanEmail || !password || !confirmPassword) {
       showToast('Preencha todos os campos', 'info');
       return;
     }
 
-    if (password !== confirmPassword) {
-      showToast('As senhas não coincidem', 'error');
+    if (cleanName.length < 2) {
+      showToast('Digite seu nome completo', 'info');
+      return;
+    }
+
+    if (!isPasswordValid(password, confirmPassword)) {
+      if (password.length < AUTH_MIN_PASSWORD_LENGTH) {
+        showToast(`A senha deve ter pelo menos ${AUTH_MIN_PASSWORD_LENGTH} caracteres`, 'info');
+      } else {
+        showToast('As senhas não coincidem', 'error');
+      }
       return;
     }
 
@@ -143,20 +65,24 @@ export default function RegisterScreen() {
 
     setLoading(true);
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+      const { uid } = userCredential.user;
+      requestAppTourSession(uid);
+      await markAppTourPending(uid);
       await updateProfile(userCredential.user, {
-        displayName: name,
+        displayName: cleanName,
       });
       showToast('Conta criada com sucesso!', 'success');
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Erro de registro:', error);
       let errorMessage = 'Não foi possível criar sua conta.';
-      if (error.code === 'auth/email-already-in-use') {
+      const code = (error as { code?: string })?.code;
+      if (code === 'auth/email-already-in-use') {
         errorMessage = 'Este e-mail já está em uso.';
-      } else if (error.code === 'auth/invalid-email') {
+      } else if (code === 'auth/invalid-email') {
         errorMessage = 'E-mail inválido.';
-      } else if (error.code === 'auth/weak-password') {
-        errorMessage = 'A senha é muito fraca.';
+      } else if (code === 'auth/weak-password') {
+        errorMessage = `A senha deve ter pelo menos ${AUTH_MIN_PASSWORD_LENGTH} caracteres.`;
       }
       showToast(errorMessage, 'error');
     } finally {
@@ -164,214 +90,211 @@ export default function RegisterScreen() {
     }
   };
 
-  const isFormValid = name.length > 0 && email.length > 0 && password.length >= 6 && password === confirmPassword;
+  const isFormValid =
+    name.trim().length >= 2 &&
+    email.trim().length > 0 &&
+    isPasswordValid(password, confirmPassword);
 
   return (
-    <View style={styles.container}>
-      <StatusBar barStyle="dark-content" />
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={{ flex: 1 }}
-      >
-        <ScrollView
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-        >
-          <View style={styles.headerContainer}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-              <Ionicons name="arrow-back" size={28} color={PRIMARY_GREEN} />
-            </TouchableOpacity>
-          </View>
+    <AuthScreenShell>
+      <View style={[styles.page, { maxWidth: layout.maxFormWidth, width: '100%', alignSelf: 'center' }]}>
+        <View style={styles.headerRow}>
+          <TouchableOpacity
+            onPress={() => router.back()}
+            style={styles.backButton}
+            accessibilityRole="button"
+            accessibilityLabel="Voltar"
+          >
+            <Ionicons name="arrow-back" size={26} color={AUTH_PRIMARY_GREEN} />
+          </TouchableOpacity>
+        </View>
 
-          <View style={styles.titleContainer}>
-            <Text style={styles.title}>Criar Conta</Text>
-            <Text style={styles.subtitle}>Comece a organizar suas finanças hoje mesmo</Text>
-          </View>
+        <View style={styles.hero}>
+          <Text style={[styles.title, { fontSize: layout.titleFontSize }]}>Criar conta</Text>
+          <Text style={[styles.subtitle, { fontSize: layout.subtitleFontSize }]}>
+            Comece a organizar suas finanças hoje mesmo
+          </Text>
+        </View>
 
-          <View style={styles.formContainer}>
+        <View style={styles.formCard}>
+          <AuthAnimatedInput
+            label="Nome completo"
+            icon="person-outline"
+            value={name}
+            onChangeText={setName}
+            placeholder="Seu nome"
+            autoCapitalize="words"
+            autoComplete="name"
+            textContentType="name"
+            inputHeight={layout.inputHeight}
+            labelFontSize={layout.labelFontSize}
+            inputFontSize={layout.inputFontSize}
+          />
 
-            <AnimatedInput
-              label="Nome Completo"
-              icon="person-outline"
-              value={name}
-              onChangeText={setName}
-              placeholder="Seu nome"
-              autoCapitalize="words"
-            />
+          <View style={{ height: layout.formGap }} />
 
-             <AnimatedInput
-              label="E-mail"
-              icon="mail-outline"
-              value={email}
-              onChangeText={setEmail}
-              placeholder="seu@email.com"
-              autoCapitalize="none"
-            />
+          <AuthAnimatedInput
+            label="E-mail"
+            icon="mail-outline"
+            value={email}
+            onChangeText={setEmail}
+            placeholder="seu@email.com"
+            autoCapitalize="none"
+            keyboardType="email-address"
+            autoComplete="email"
+            textContentType="emailAddress"
+            inputHeight={layout.inputHeight}
+            labelFontSize={layout.labelFontSize}
+            inputFontSize={layout.inputFontSize}
+          />
 
-            <AnimatedInput
-              label="Senha"
-              icon="lock-closed-outline"
-              value={password}
-              onChangeText={setPassword}
-              placeholder="Mínimo 6 caracteres"
-              secureTextEntry
-            />
+          <View style={{ height: layout.formGap }} />
 
-            <AnimatedInput
-              label="Confirmar Senha"
-              icon="checkmark-circle-outline"
-              value={confirmPassword}
-              onChangeText={setConfirmPassword}
-              placeholder="Repita sua senha"
-              secureTextEntry
-            />
+          <AuthAnimatedInput
+            label="Senha"
+            icon="lock-closed-outline"
+            value={password}
+            onChangeText={setPassword}
+            placeholder={`Mínimo ${AUTH_MIN_PASSWORD_LENGTH} caracteres`}
+            secureTextEntry
+            autoComplete="new-password"
+            textContentType="newPassword"
+            inputHeight={layout.inputHeight}
+            labelFontSize={layout.labelFontSize}
+            inputFontSize={layout.inputFontSize}
+          />
 
-            {/* Botão Cadastrar */}
-            <Pressable
-              onPress={handleRegister}
-              disabled={loading}
-              style={({ pressed }) => [
-                styles.button,
-                (pressed || (isFormValid && !loading)) ? styles.buttonActive : styles.buttonInactive,
-                { transform: [{ scale: (pressed && !loading) ? 0.96 : 1 }] }
-              ]}
-            >
-              {loading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.buttonText}>Criar Conta</Text>
-              )}
-            </Pressable>
+          <PasswordRequirements
+            password={password}
+            confirmPassword={confirmPassword}
+            compact={layout.width < 360}
+          />
 
-            {/* Link de Login */}
-            <View style={styles.footer}>
-              <Text style={styles.footerText}>já tem uma conta? </Text>
-              <TouchableOpacity onPress={() => router.back()}>
-                <Text style={styles.footerLink}>Entrar</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
-    </View>
+          <View style={{ height: layout.formGap }} />
+
+          <AuthAnimatedInput
+            label="Confirmar senha"
+            icon="checkmark-circle-outline"
+            value={confirmPassword}
+            onChangeText={setConfirmPassword}
+            placeholder="Repita sua senha"
+            secureTextEntry
+            autoComplete="new-password"
+            textContentType="newPassword"
+            inputHeight={layout.inputHeight}
+            labelFontSize={layout.labelFontSize}
+            inputFontSize={layout.inputFontSize}
+          />
+
+          <Pressable
+            onPress={handleRegister}
+            disabled={loading || !isFormValid}
+            style={({ pressed }) => [
+              styles.button,
+              { height: layout.buttonHeight, borderRadius: layout.buttonHeight / 2, marginTop: layout.formGap + 4 },
+              isFormValid && !loading ? styles.buttonActive : styles.buttonInactive,
+              pressed && !loading && isFormValid && styles.buttonPressed,
+            ]}
+          >
+            {loading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <>
+                <Text style={styles.buttonText}>Criar conta</Text>
+                <Ionicons name="person-add-outline" size={20} color="#fff" style={styles.buttonIcon} />
+              </>
+            )}
+          </Pressable>
+        </View>
+
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>Já tem uma conta? </Text>
+          <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}>
+            <Text style={styles.footerLink}>Entrar</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </AuthScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
+  page: {
+    width: '100%',
   },
-  scrollContent: {
-    flexGrow: 1,
-    paddingHorizontal: 30,
-    paddingTop: 20,
-    paddingBottom: 40,
-  },
-  headerContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 20,
+  headerRow: {
+    marginBottom: 8,
   },
   backButton: {
+    alignSelf: 'flex-start',
     padding: 8,
-    marginLeft: -10,
+    marginLeft: -8,
   },
-  logoMiniContainer: {
-    paddingRight: 10,
-  },
-  logoMini: {
-    width: 100,
-    height: 50,
-  },
-  titleContainer: {
-    marginBottom: 30,
+  hero: {
+    marginBottom: 22,
   },
   title: {
-    fontSize: 32,
     fontWeight: '900',
     color: '#333',
     marginBottom: 8,
   },
   subtitle: {
-    fontSize: 16,
-    color: TEXT_GRAY,
+    color: AUTH_TEXT_GRAY,
     lineHeight: 22,
   },
-  formContainer: {
+  formCard: {
     width: '100%',
-    maxWidth: 400,
-    alignSelf: 'center',
-  },
-  inputGroup: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: '700',
-    marginBottom: 6,
-    marginLeft: 4,
-  },
-  inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 15,
-    paddingHorizontal: 16,
-    height: 56,
+    padding: 20,
+    borderRadius: 24,
     backgroundColor: '#FAFAFA',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 4,
-  },
-  inputIcon: {
-    marginRight: 12,
-  },
-  input: {
-    flex: 1,
-    height: '100%',
-    fontSize: 16,
-    color: '#333',
-    fontWeight: '500',
-  },
-  eyeIcon: {
-    padding: 4,
+    borderWidth: 1,
+    borderColor: '#EEEEEE',
   },
   button: {
-    height: 56,
-    borderRadius: 28,
+    flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: 20,
+    gap: 8,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.18,
     shadowRadius: 8,
-    elevation: 5,
+    elevation: 4,
   },
   buttonActive: {
-    backgroundColor: PRIMARY_GREEN,
+    backgroundColor: AUTH_PRIMARY_GREEN,
   },
   buttonInactive: {
-    backgroundColor: BUTTON_GRAY,
+    backgroundColor: AUTH_BUTTON_GRAY,
+    shadowOpacity: 0.06,
+    elevation: 0,
+  },
+  buttonPressed: {
+    opacity: 0.92,
+    transform: [{ scale: 0.98 }],
   },
   buttonText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '800',
-    letterSpacing: 1,
+    letterSpacing: 0.5,
+  },
+  buttonIcon: {
+    marginTop: 1,
   },
   footer: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: 30,
+    flexWrap: 'wrap',
+    marginTop: 28,
+    paddingHorizontal: 4,
   },
   footerText: {
-    color: TEXT_GRAY,
+    color: AUTH_TEXT_GRAY,
     fontSize: 15,
   },
   footerLink: {
-    color: PRIMARY_GREEN,
+    color: AUTH_PRIMARY_GREEN,
     fontSize: 15,
     fontWeight: '800',
   },

@@ -1,14 +1,28 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import React, { useEffect, useState } from 'react';
-import 'react-native-reanimated';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth } from '../scripts/firebaseConfig';
-import { View, ActivityIndicator } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, View } from 'react-native';
+import 'react-native-reanimated';
 import { ToastProvider } from '../context/ToastContext';
+import { auth } from '../scripts/firebaseConfig';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import * as Notifications from 'expo-notifications';
+import { Platform } from 'react-native';
+
+if (Platform.OS !== 'web') {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+      shouldShowBanner: true,
+      shouldShowList: true,
+    }),
+  });
+}
 
 export const unstable_settings = {
   anchor: '(tabs)',

@@ -166,8 +166,7 @@ function buildContextBlock(context?: FinanceContext | null): string {
 - Estimativa mensal pela média recente: ${context.estimatedMonthlySpend > 0 ? formatCurrency(context.estimatedMonthlySpend) : 'sem dados suficientes'}
 - Quantidade de compras confirmadas no mês atual: ${context.currentMonthItemCount}
 - Gastos por categoria no mês atual:
-  - Alimentação: ${formatCurrency(context.categoryTotals.Alimentação)}
-  - Transporte: ${formatCurrency(context.categoryTotals.Transporte)}
+  - Alimentação (mercado geral): ${formatCurrency(context.categoryTotals.Alimentação)}
   - Outros: ${formatCurrency(context.categoryTotals.Outros)}
 - Últimos itens com preço: ${topItems}
 - Evolução mensal recente: ${monthlyTotals}`;
@@ -281,6 +280,66 @@ export const filterResultsWithAI = async (results: any[], activeFilter: string):
   } catch (error) {
     console.warn('Fallback local de filtro usado:', error);
     return localMatches.length > 0 ? localMatches : results;
+  }
+};
+
+export const filterProductsByRegionWithAI = async (
+  results: any[],
+  location: { city?: string; state?: string; country?: string }
+): Promise<any[]> => {
+  if (!location || results.length === 0) return results;
+
+  try {
+    const regionName = [location.city, location.state, location.country].filter(Boolean).join(', ');
+    const productList = results
+      .map((result, idx) => `${idx}: ${result.name || result.description || ''}`)
+      .join(' | ');
+
+    const response = await callGeminiText({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `Você é um assistente de mercado brasileiro. Região do usuário: ${regionName}.\n\nLista de produtos:\n${productList}\n\nReordene ou filtre a lista priorizando marcas regionais locais, produtos típicos ou marcas mais populares e consumidas na região indicada. Retorne APENAS os índices dos produtos (ex: "0, 2, 1, 3") em ordem de relevância geográfica. Se todos forem igualmente relevantes, retorne todos na ordem original.`
+            }
+          ]
+        }
+      ],
+      systemInstruction: 'Você ordena e filtra índices de produtos com base na relevância geográfica. Responda apenas com os índices separados por vírgula.',
+      model: LUCA_MODELS.fallback,
+      temperature: 0.15,
+      maxOutputTokens: 200,
+    });
+
+    const indices = response
+      .replace(/[^\d,]/g, '')
+      .split(',')
+      .map(num => parseInt(num.trim(), 10))
+      .filter(num => !isNaN(num) && num >= 0 && num < results.length);
+
+    if (indices.length === 0) return results;
+
+    const sortedResults: any[] = [];
+    const addedIndices = new Set<number>();
+
+    indices.forEach(idx => {
+      if (!addedIndices.has(idx)) {
+        sortedResults.push(results[idx]);
+        addedIndices.add(idx);
+      }
+    });
+
+    results.forEach((result, idx) => {
+      if (!addedIndices.has(idx)) {
+        sortedResults.push(result);
+      }
+    });
+
+    return sortedResults;
+  } catch (error) {
+    console.warn('Filtro de região por IA falhou, usando ordem original:', error);
+    return results;
   }
 };
 

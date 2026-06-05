@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 import {
   EmailAuthProvider,
@@ -11,7 +12,6 @@ import {
   updateProfile,
 } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -32,7 +32,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { auth, db, storage } from '../../scripts/firebaseConfig';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { auth, db } from '../../scripts/firebaseConfig';
+import { formatLocationLabel, getCachedLocation, requestUserLocation } from '../../scripts/locationService';
 
 const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
@@ -40,7 +42,7 @@ const TEXT_DARK = '#1E293B';
 const TEXT_GRAY = '#64748B';
 const DANGER = '#EF4444';
 
-type ProfileModal = 'personal' | 'notifications' | 'security' | 'help' | null;
+type ProfileModal = 'personal' | 'notifications' | 'security' | 'help' | 'location' | null;
 
 type NotificationSettings = {
   budgetAlerts: boolean;
@@ -67,14 +69,17 @@ export default function ProfileScreen() {
   const [photoURL, setPhotoURL] = useState(auth.currentUser?.photoURL || '');
   const [notifications, setNotifications] = useState<NotificationSettings>(DEFAULT_NOTIFICATIONS);
   const [saving, setSaving] = useState(false);
+  const [locationUpdating, setLocationUpdating] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [locationFilterEnabled, setLocationFilterEnabled] = useState(true);
+  const [currentLocationLabel, setCurrentLocationLabel] = useState('');
 
   const userUid = user?.uid;
   const profileRef = useMemo(
-    () => (userUid ? doc(db, 'users', userUid, 'settings', 'profile') : null),
+    () => (userUid ? doc(db, 'users', userUid) : null),
     [userUid]
   );
 
@@ -111,6 +116,15 @@ export default function ProfileScreen() {
           ...DEFAULT_NOTIFICATIONS,
           ...(data.notifications || {}),
         });
+        // Load location filter preference
+        const enabledRaw = await AsyncStorage.getItem('@meu-cesto:location-filter-enabled');
+        setLocationFilterEnabled(enabledRaw === null ? true : enabledRaw === 'true');
+
+        // Load cached location label
+        const cachedLoc = await getCachedLocation();
+        if (cachedLoc) {
+          setCurrentLocationLabel(formatLocationLabel(cachedLoc));
+        }
       } catch (error) {
         console.warn('[Perfil] Não foi possível carregar configurações:', error);
       }
@@ -178,8 +192,9 @@ export default function ProfileScreen() {
       const result = await ImagePicker.launchImageLibraryAsync({
         allowsEditing: true,
         aspect: [1, 1],
-        quality: 0.75,
+        quality: 0.35, // Keep file size small for Firestore limit
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        base64: true,
       });
 
       if (result.canceled || !result.assets?.[0]?.uri) return;
@@ -187,30 +202,83 @@ export default function ProfileScreen() {
       setUploadingAvatar(true);
 
       const selected = result.assets[0];
-      const response = await fetch(selected.uri);
-      const blob = await response.blob();
-      const avatarRef = ref(storage, `users/${user.uid}/avatar.jpg`);
+      let base64Data = selected.base64;
 
-      await uploadBytes(avatarRef, blob, {
-        contentType: selected.mimeType || blob.type || 'image/jpeg',
-      });
+      if (!base64Data) {
+        // Fallback to fetch and FileReader if base64 is not populated
+        const response = await fetch(selected.uri);
+        const blob = await response.blob();
+        base64Data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const resultStr = reader.result as string;
+            const base64Str = resultStr.split(',')[1] || resultStr;
+            resolve(base64Str);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
 
-      const downloadURL = await getDownloadURL(avatarRef);
+      const mimeType = selected.mimeType || 'image/jpeg';
+      const base64PhotoURL = `data:${mimeType};base64,${base64Data}`;
 
       const profileName = displayName.trim() || user.displayName || '';
 
-      await updateProfile(user, { displayName: profileName, photoURL: downloadURL });
-      await saveProfileDocument({ displayName: profileName, photoURL: downloadURL });
+      // Try updating Auth profile. (Fallback if base64 string is too long for Auth photoURL limit)
+      try {
+        await updateProfile(user, { displayName: profileName, photoURL: base64PhotoURL });
+      } catch (authErr) {
+        console.warn('[Perfil] Não foi possível atualizar fotoURL no Firebase Auth (tamanho limite excedido):', authErr);
+        await updateProfile(user, { displayName: profileName });
+      }
+
+      await saveProfileDocument({ displayName: profileName, photoURL: base64PhotoURL });
 
       setDisplayName(profileName);
-      setPhotoURL(downloadURL);
+      setPhotoURL(base64PhotoURL);
       setUser(auth.currentUser);
-      showMessage('Foto atualizada', 'Seu avatar foi salvo com sucesso.');
+      showMessage('Foto atualizada', 'Seu avatar foi salvo com sucesso no Firestore.');
     } catch (error) {
-      console.error('[Perfil] Erro ao enviar avatar:', error);
-      showMessage('Erro no avatar', 'Não consegui enviar a foto. Verifique se o Firebase Storage está ativado.');
+      console.error('[Perfil] Erro ao salvar avatar:', error);
+      showMessage('Erro no avatar', 'Não consegui salvar a foto no Firestore.');
     } finally {
       setUploadingAvatar(false);
+    }
+  };
+
+  const handleSendTestNotification = async () => {
+    if (Platform.OS === 'web') {
+      showMessage('Notificações', 'Notificações nativas não são suportadas no navegador web.');
+      return;
+    }
+
+    try {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== 'granted') {
+        showMessage('Permissão necessária', 'Habilite as notificações nas configurações do seu celular para receber alertas.');
+        return;
+      }
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Meu Cesto 🛒',
+          body: 'Esta é uma notificação de teste! Suas notificações estão funcionando perfeitamente.',
+          sound: true,
+          priority: Notifications.AndroidNotificationPriority.HIGH,
+        },
+        trigger: null,
+      });
+    } catch (error) {
+      console.error('[Perfil] Erro ao enviar notificação de teste:', error);
+      showMessage('Erro', 'Ocorreu um erro ao tentar enviar a notificação.');
     }
   };
 
@@ -308,6 +376,33 @@ export default function ProfileScreen() {
     }));
   };
 
+  const toggleLocationFilter = async () => {
+    const nextVal = !locationFilterEnabled;
+    setLocationFilterEnabled(nextVal);
+    await AsyncStorage.setItem('@meu-cesto:location-filter-enabled', String(nextVal));
+  };
+
+  const handleForceLocationUpdate = async () => {
+    setLocationUpdating(true);
+    const { location, status } = await requestUserLocation();
+    setLocationUpdating(false);
+    if (status === 'granted' && location) {
+      setCurrentLocationLabel(formatLocationLabel(location));
+      showMessage('Localização atualizada', `Seu local foi definido como ${formatLocationLabel(location)}.`);
+    } else if (status === 'denied') {
+      Alert.alert(
+        'Permissão necessária',
+        'Não foi possível buscar a localização. Caso o acesso tenha sido negado no dispositivo, você pode habilitá-lo nas configurações.',
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          { text: 'Abrir Configurações', onPress: () => Linking.openSettings() }
+        ]
+      );
+    } else {
+      showMessage('Erro', 'A localização está indisponível no momento.');
+    }
+  };
+
   if (!authReady) {
     return (
       <View style={styles.loadingContainer}>
@@ -351,6 +446,7 @@ export default function ProfileScreen() {
         <View style={styles.menuCard}>
           <MenuItem icon="person-outline" title="Dados Pessoais" onPress={() => setActiveModal('personal')} />
           <MenuItem icon="notifications-outline" title="Notificações" onPress={() => setActiveModal('notifications')} />
+          <MenuItem icon="location-outline" title="Filtro por Localização" onPress={() => setActiveModal('location')} />
           <MenuItem icon="shield-checkmark-outline" title="Segurança" onPress={() => setActiveModal('security')} />
           <MenuItem icon="help-circle-outline" title="Ajuda & Suporte" onPress={() => setActiveModal('help')} />
           <MenuItem
@@ -405,7 +501,46 @@ export default function ProfileScreen() {
           onPress={() => toggleNotification('weeklySummary')}
         />
 
+        <TouchableOpacity style={styles.testNotificationButton} onPress={handleSendTestNotification}>
+          <Ionicons name="notifications-outline" size={18} color={PRIMARY_GREEN} />
+          <Text style={styles.testNotificationButtonText}>Enviar Notificação de Teste</Text>
+        </TouchableOpacity>
+
         <PrimaryButton title="Salvar notificações" loading={saving} onPress={handleSaveNotifications} />
+      </ModalShell>
+
+      <ModalShell visible={activeModal === 'location'} title="Filtro por Localização" onClose={closeModal}>
+        <SettingToggle
+          title="Filtro regional inteligente"
+          description="Prioriza marcas regionais, ofertas típicas e ajusta o buscador com base na sua localização."
+          value={locationFilterEnabled}
+          onPress={toggleLocationFilter}
+        />
+
+        {locationFilterEnabled && (
+          <View style={styles.locationStatusBox}>
+            <Ionicons name="location" size={20} color={PRIMARY_GREEN} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.locationStatusTitle}>Localização atual</Text>
+              <Text style={styles.locationStatusText}>
+                {currentLocationLabel || 'Nenhuma localização detectada'}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {locationFilterEnabled && (
+          <TouchableOpacity style={styles.testNotificationButton} onPress={handleForceLocationUpdate} disabled={locationUpdating}>
+            {locationUpdating ? (
+              <ActivityIndicator size="small" color={PRIMARY_GREEN} />
+            ) : (
+              <>
+                <Ionicons name="refresh-outline" size={18} color={PRIMARY_GREEN} />
+                <Text style={styles.testNotificationButtonText}>Atualizar Localização</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
       </ModalShell>
 
       <ModalShell visible={activeModal === 'security'} title="Segurança" onClose={closeModal}>
@@ -959,5 +1094,46 @@ const styles = StyleSheet.create({
     color: PRIMARY_GREEN,
     fontSize: 15,
     fontWeight: '900',
+  },
+  testNotificationButton: {
+    height: 54,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    backgroundColor: '#F0FDF4',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 15,
+    marginBottom: 5,
+  },
+  testNotificationButtonText: {
+    color: PRIMARY_GREEN,
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  locationStatusBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginTop: 20,
+    marginBottom: 5,
+  },
+  locationStatusTitle: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    marginBottom: 2,
+  },
+  locationStatusText: {
+    fontSize: 14,
+    color: TEXT_GRAY,
+    fontWeight: '700',
   },
 });

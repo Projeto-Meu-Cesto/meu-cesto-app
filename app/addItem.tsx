@@ -1,13 +1,14 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { addDoc, collection, Timestamp } from 'firebase/firestore';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Dimensions,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   ScrollView,
@@ -18,19 +19,33 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { categorizeProductLocal } from '../scripts/aiService';
-import { CosmosProduct, fetchFallbackImage, fetchProductsByName } from '../scripts/cosmosService';
+import { useToast } from '../context/ToastContext';
+import { categorizeProductLocal, filterProductsByRegionWithAI } from '../scripts/aiService';
+import {
+  Product,
+  fetchFallbackImage,
+  fetchProductsByName,
+  getProductImageUrl,
+  hasProductImage,
+} from '../scripts/productService';
 import { auth, db } from '../scripts/firebaseConfig';
+import {
+  UserLocation,
+  checkLocationPermission,
+  formatLocationLabel,
+  getCachedLocation,
+  requestUserLocation,
+} from '../scripts/locationService';
+import { wait } from '../scripts/utils';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  PRIMARY_GREEN,
+  BG_LIGHT,
+  TEXT_DARK,
+  TEXT_GRAY,
+  STATUS_BAR_HEIGHT_SM as STATUS_BAR_HEIGHT,
+} from '../constants/theme';
 
-const { height } = Dimensions.get('window');
-const STATUS_BAR_HEIGHT = Platform.OS === 'android'
-  ? (StatusBar.currentHeight ?? 24)
-  : 44; // iOS safe area top (cobre notch e Dynamic Island)
-
-const PRIMARY_GREEN = '#00A36C';
-const BG_LIGHT = '#F8FAFC';
-const TEXT_DARK = '#1E293B';
-const TEXT_GRAY = '#64748B';
 const SAVE_TIMEOUT_MS = 1400;
 
 type ItemPayload = {
@@ -45,66 +60,92 @@ type ItemPayload = {
   checkedAt: null;
 };
 
-function wait(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function normalizePriceTyping(value: string) {
-  const clean = value.replace(/[^\d,.]/g, '').replace(/\./g, ',');
-  const [whole, ...decimalParts] = clean.split(',');
-
-  if (decimalParts.length === 0) {
-    return whole;
-  }
-
-  return `${whole},${decimalParts.join('').slice(0, 2)}`;
-}
-
-function normalizePriceForStorage(value: string) {
-  const normalized = value
-    .replace(/[^\d,.-]/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.');
-
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) && parsed > 0
-    ? parsed.toFixed(2).replace('.', ',')
-    : '';
-}
-
-function normalizeQuantityTyping(value: string) {
-  return value.replace(/[^\d]/g, '').slice(0, 3);
-}
-
 function normalizeProductNameTyping(value: string) {
-  return value.toLocaleUpperCase('pt-BR');
+  // Retorna como o usuário digitou, sem forçar uppercase
+  return value;
 }
 
-function parseQuantity(value: string) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+function itemKey(item: Product) {
+  return String(item.barcode || item.gtin);
 }
 
 export default function AddItemScreen() {
+  const insets = useSafeAreaInsets();
   const [name, setName] = useState('');
-  const [manualPrice, setManualPrice] = useState('');
-  const [quantity, setQuantity] = useState('1');
+  const [itemQuantities, setItemQuantities] = useState<Record<string, number>>({});
   const [searching, setSearching] = useState(false);
-  const [results, setResults] = useState<CosmosProduct[]>([]);
-  const [selectedItems, setSelectedItems] = useState<CosmosProduct[]>([]);
+  const [results, setResults] = useState<Product[]>([]);
+  const [selectedItems, setSelectedItems] = useState<Product[]>([]);
   const [activeFilter, setActiveFilter] = useState('Tudo');
-  const [selectedDetailItem, setSelectedDetailItem] = useState<CosmosProduct | null>(null);
+  const [selectedDetailItem, setSelectedDetailItem] = useState<Product | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [detailImage, setDetailImage] = useState<string | null>(null);
   const [loadingImage, setLoadingImage] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationModal, setLocationModal] = useState(false);
   const filters = ['Tudo', 'Frutas', 'Laticínios', 'Limpeza', 'Higiene', 'Bebidas', 'Padaria', 'Carnes'];
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
   const user = auth.currentUser;
+  const { showToast } = useToast();
+
+  // Carrega localização ao montar
+  useEffect(() => {
+    const initLocation = async () => {
+      const enabledRaw = await AsyncStorage.getItem('@meu-cesto:location-filter-enabled');
+      const isFilterEnabled = enabledRaw === null ? true : enabledRaw === 'true';
+
+      if (!isFilterEnabled) {
+        return;
+      }
+
+      const cached = await getCachedLocation();
+      if (cached) {
+        setUserLocation(cached);
+        return;
+      }
+
+      const perm = await checkLocationPermission();
+      if (perm === 'granted') {
+        setLocationLoading(true);
+        const { location } = await requestUserLocation();
+        setUserLocation(location);
+        setLocationLoading(false);
+      } else {
+        setLocationModal(true);
+      }
+    };
+    initLocation();
+  }, []);
+
+  const handleRequestLocation = useCallback(async () => {
+    setLocationModal(false);
+    setLocationLoading(true);
+    const { location, status } = await requestUserLocation();
+    setLocationLoading(false);
+    if (status === 'granted' && location) {
+      setUserLocation(location);
+      showToast(`📍 Localização: ${formatLocationLabel(location)}`, 'success');
+    } else if (status === 'denied') {
+      Alert.alert(
+        'Permissão necessária',
+        'Não foi possível acessar a localização. Caso o acesso tenha sido negado no dispositivo, você pode habilitá-lo nas configurações do celular.',
+        [
+          { text: 'Agora não', style: 'cancel' },
+          { text: 'Abrir Configurações', onPress: () => Linking.openSettings() }
+        ]
+      );
+    }
+  }, [showToast]);
 
   // Busca automática com debounce de 600ms
+  // BUG FIX: userLocation adicionado às dependências — antes o filtro regional
+  // não era reaplicado quando a localização era carregada após o nome já digitado.
   useEffect(() => {
+    let isActive = true;
+
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
     if (!name || name.trim().length < 3) {
@@ -116,70 +157,101 @@ export default function AddItemScreen() {
       setSearching(true);
       try {
         const searchTerm = name.trim();
+        // fetchProductsByName já faz Firestore cache-first + Open Food Facts
         const data = await fetchProductsByName(searchTerm);
 
-        // Ordenação inteligente: termo exato primeiro, depois os que começam com o termo
-        const sorted = (data || []).sort((a, b) => {
-          const aDesc = a.description.toLowerCase();
-          const bDesc = b.description.toLowerCase();
-          const query = searchTerm.toLowerCase();
+        let finalResults = data || [];
+        if (userLocation && finalResults.length > 0) {
+          try {
+            // Só executa o filtro se a busca não foi cancelada
+            if (isActive) {
+              finalResults = await filterProductsByRegionWithAI(finalResults, userLocation);
+            }
+          } catch (e) {
+            console.warn('[AI Region Filter] Falhou ao filtrar por região:', e);
+          }
+        }
 
-          if (aDesc === query && bDesc !== query) return -1;
-          if (bDesc === query && aDesc !== query) return 1;
-
-          const aStarts = aDesc.startsWith(query);
-          const bStarts = bDesc.startsWith(query);
-          if (aStarts && !bStarts) return -1;
-          if (bStarts && !aStarts) return 1;
-
-          return 0;
-        });
-
-        setResults(sorted);
+        if (isActive) {
+          setResults(finalResults);
+        }
       } catch {
-        console.warn('[Cosmos] Busca indisponível. Você ainda pode adicionar manualmente.');
-        setResults([]);
+        if (isActive) {
+          console.warn('[Product] Busca indisponível. Você ainda pode adicionar manualmente.');
+          setResults([]);
+          showToast('Busca temporariamente indisponível. Tente de novo ou adicione manualmente.', 'info');
+        }
       } finally {
-        setSearching(false);
+        if (isActive) {
+          setSearching(false);
+        }
       }
-    }, 600);
+    }, 900);
 
     return () => {
+      isActive = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [name]);
+  }, [name, userLocation]); // ← userLocation adicionado (bug fix)
 
-  const toggleSelection = (item: CosmosProduct) => {
-    setSelectedItems(prev => {
-      const exists = prev.find(i => i.gtin === item.gtin);
+  const getItemQuantity = useCallback(
+    (item: Product) => itemQuantities[itemKey(item)] ?? 1,
+    [itemQuantities]
+  );
+
+  const changeItemQuantity = useCallback((item: Product, delta: number) => {
+    const key = itemKey(item);
+    setItemQuantities((prev) => {
+      const next = Math.min(99, Math.max(1, (prev[key] ?? 1) + delta));
+      return { ...prev, [key]: next };
+    });
+  }, []);
+
+  const toggleSelection = (item: Product) => {
+    const key = itemKey(item);
+    setSelectedItems((prev) => {
+      const exists = prev.find((i) => itemKey(i) === key);
       if (exists) {
-        return prev.filter(i => i.gtin !== item.gtin);
+        setItemQuantities((qty) => {
+          const next = { ...qty };
+          delete next[key];
+          return next;
+        });
+        return prev.filter((i) => itemKey(i) !== key);
       }
+      setItemQuantities((qty) => ({ ...qty, [key]: qty[key] ?? 1 }));
       return [...prev, item];
     });
   };
 
+  const hasSelection = selectedItems.length > 0;
+
   const handleAddItem = async () => {
     if (!user) {
-      Alert.alert('Erro', 'Você precisa estar logado.');
+      showToast('Você precisa estar logado.', 'error');
       return;
     }
 
     if (saving) return;
 
+    if (selectedItems.length === 0) {
+      showToast('Selecione um produto na lista para adicionar.', 'info');
+      return;
+    }
+
     setSaving(true);
     try {
       const payloads: ItemPayload[] = [];
 
-      if (selectedItems.length > 0) {
-        selectedItems.forEach((item) => {
-          const itemName = normalizeProductNameTyping(item.description);
+      selectedItems.forEach((item) => {
+          const itemName = normalizeProductNameTyping(item.name || item.description);
+          const imageUrl = getProductImageUrl(item);
           const itemToAdd = {
             name: itemName,
-            price: item.avg_price?.toString() || '',
-            quantity: 1,
-            brand: item.brand?.name || '',
-            thumbnail: item.thumbnail || ''
+            price: '',
+            quantity: getItemQuantity(item),
+            brand: item.brand || '',
+            thumbnail: hasProductImage(item) ? imageUrl : '',
           };
 
           const category = categorizeProductLocal(itemName);
@@ -192,30 +264,6 @@ export default function AddItemScreen() {
             checkedAt: null,
           });
         });
-      } else {
-        if (!name.trim()) {
-          Alert.alert('Aviso', 'Digite o nome do produto ou selecione na lista.');
-          setSaving(false);
-          return;
-        }
-
-        const cleanName = normalizeProductNameTyping(name.trim());
-        const cleanPrice = normalizePriceForStorage(manualPrice);
-        const cleanQuantity = parseQuantity(quantity);
-        const category = categorizeProductLocal(cleanName);
-
-        payloads.push({
-          name: cleanName,
-          price: cleanPrice,
-          quantity: cleanQuantity,
-          brand: '',
-          thumbnail: '',
-          checked: false,
-          category: category,
-          createdAt: Timestamp.now(),
-          checkedAt: null,
-        });
-      }
 
       const writes = payloads.map((payload) =>
         addDoc(collection(db, 'users', user.uid, 'shopping_list'), payload)
@@ -234,10 +282,7 @@ export default function AddItemScreen() {
       ]);
 
       if (result === 'failed') {
-        Alert.alert(
-          'Erro ao salvar',
-          'Não foi possível adicionar agora. Verifique sua conexão e tente novamente.'
-        );
+        showToast('Não foi possível adicionar. Verifique sua conexão.', 'error');
         return;
       }
 
@@ -249,16 +294,20 @@ export default function AddItemScreen() {
         });
       }
 
+      const count = payloads.length;
+      showToast(
+        count === 1
+          ? `✅ "${payloads[0].name}" adicionado à lista!`
+          : `✅ ${count} itens adicionados à lista!`,
+        'success'
+      );
+
       setName('');
-      setManualPrice('');
-      setQuantity('1');
+      setItemQuantities({});
       setSelectedItems([]);
       router.replace('/lists');
     } catch {
-      Alert.alert(
-        'Erro ao salvar',
-        'Não foi possível adicionar agora. Verifique sua conexão e se o Firebase está liberado para sua conta.'
-      );
+      showToast('Não foi possível adicionar. Verifique sua conexão.', 'error');
     } finally {
       setSaving(false);
     }
@@ -277,7 +326,23 @@ export default function AddItemScreen() {
           <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
             <Ionicons name="chevron-back" size={28} color="#fff" />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Adicionar item</Text>
+          <View style={{ flex: 1, alignItems: 'center' }}>
+            <Text style={styles.headerTitle}>Adicionar item</Text>
+            <TouchableOpacity
+              style={styles.locationBadge}
+              onPress={() => setLocationModal(true)}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="location-outline" size={11} color="rgba(255,255,255,0.85)" />
+              {locationLoading ? (
+                <ActivityIndicator size="small" color="rgba(255,255,255,0.85)" style={{ marginLeft: 4 }} />
+              ) : (
+                <Text style={styles.locationBadgeText}>
+                  {userLocation ? formatLocationLabel(userLocation) : 'Definir localização'}
+                </Text>
+              )}
+            </TouchableOpacity>
+          </View>
           <View style={{ width: 40 }} />
         </View>
 
@@ -290,41 +355,13 @@ export default function AddItemScreen() {
             onChangeText={(value) => setName(normalizeProductNameTyping(value))}
             placeholderTextColor="#94A3B8"
             autoFocus
-            autoCapitalize="characters"
+            autoCapitalize="sentences"
             autoCorrect={false}
             returnKeyType="search"
           />
           {searching && (
             <ActivityIndicator size="small" color={PRIMARY_GREEN} style={{ marginLeft: 8 }} />
           )}
-        </View>
-
-        <View style={styles.inputRow}>
-          <View style={[styles.inputWrapper, styles.priceInputWrapper, styles.priceInput]}>
-            <Ionicons name="cash-outline" size={20} color="#94A3B8" style={styles.inputIcon} />
-            <TextInput
-              style={styles.input}
-              placeholder="Preço. Ex: 4,99"
-              value={manualPrice}
-              onChangeText={(value) => setManualPrice(normalizePriceTyping(value))}
-              placeholderTextColor="#94A3B8"
-              keyboardType="decimal-pad"
-              returnKeyType="done"
-            />
-          </View>
-
-          <View style={[styles.inputWrapper, styles.priceInputWrapper, styles.quantityInput]}>
-            <Ionicons name="layers-outline" size={20} color="#94A3B8" style={styles.inputIcon} />
-            <TextInput
-              style={styles.input}
-              placeholder="Qtd."
-              value={quantity}
-              onChangeText={(value) => setQuantity(normalizeQuantityTyping(value))}
-              placeholderTextColor="#94A3B8"
-              keyboardType="number-pad"
-              returnKeyType="done"
-            />
-          </View>
         </View>
       </View>
 
@@ -344,67 +381,71 @@ export default function AddItemScreen() {
       </View>
 
       <ScrollView
+        style={styles.resultsScroll}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Loader de pesquisa */}
-        {searching && (
-          <View style={styles.loaderContainer}>
-            <ActivityIndicator size="large" color={PRIMARY_GREEN} />
-            <Text style={styles.loaderText}>Pesquisando produto...</Text>
-          </View>
-        )}
-
         {/* Lista de resultados */}
-        {!searching && results.length > 0 && (
+        {!searching && results.length > 0 && (() => {
+          const filtered = results.filter((item) => {
+            if (activeFilter === 'Tudo') return true;
+            return item.category === activeFilter;
+          });
+
+          return (
           <View style={styles.resultsContainer}>
             <Text style={styles.resultsTitle}>RESULTADOS ENCONTRADOS</Text>
-            {results
-              .filter(item => {
-                if (activeFilter === 'Tudo') return true;
-                const desc = item.description.toLowerCase();
-                const filter = activeFilter.toLowerCase();
-
-                const filterKeywords: { [key: string]: string[] } = {
-                  'frutas': ['fruta', 'banana', 'maçã', 'uva', 'morango', 'laranja', 'limão', 'abacaxi', 'mamão', 'melancia'],
-                  'laticínios': ['leite', 'queijo', 'iogurte', 'manteiga', 'creme', 'requeijão', 'danone', 'coalhada'],
-                  'limpeza': ['detergente', 'sabão', 'amaciante', 'limpador', 'desinfetante', 'esponja', 'cloro', 'água sanitária'],
-                  'higiene': ['shampoo', 'sabonete', 'pasta', 'escova', 'desodorante', 'papel', 'absorvente', 'fio dental'],
-                  'bebidas': ['água', 'suco', 'refrigerante', 'cerveja', 'vinho', 'café', 'chá', 'energético', 'vodka'],
-                  'padaria': ['pão', 'bolo', 'biscoito', 'bolacha', 'rosca', 'baguete', 'croissant'],
-                  'carnes': ['carne', 'frango', 'peixe', 'linguiça', 'presunto', 'salame', 'bife', 'costela'],
-                };
-
-                return filterKeywords[filter]?.some(kw => desc.includes(kw)) ?? true;
-              })
-              .map((item, index) => {
-                const isSelected = selectedItems.some(i => i.gtin === item.gtin);
+            {filtered.length === 0 ? (
+              <Text style={styles.filterEmptyText}>
+                Nenhum resultado em &quot;{activeFilter}&quot;. Troque o filtro ou refine a busca.
+              </Text>
+            ) : null}
+            {filtered.map((item) => {
+                const key = itemKey(item);
+                const isSelected = selectedItems.some((i) => itemKey(i) === key);
+                const imageUrl = getProductImageUrl(item);
+                const qty = getItemQuantity(item);
                 return (
                   <TouchableOpacity
-                    key={index}
+                    key={key}
                     style={[styles.resultItem, isSelected && styles.resultItemActive]}
                     onPress={() => toggleSelection(item)}
                     activeOpacity={0.7}
                   >
                     <View style={styles.resultLeft}>
-                      <View style={[styles.statusDot, { backgroundColor: isSelected ? PRIMARY_GREEN : '#E2E8F0' }]} />
+                      {/* Thumbnail do produto */}
+                      <View style={styles.resultThumb}>
+                        {hasProductImage(item) ? (
+                          <Image
+                            source={{ uri: imageUrl }}
+                            style={styles.resultThumbImg}
+                            resizeMode="contain"
+                          />
+                        ) : (
+                          <Ionicons name="cube-outline" size={22} color="#CBD5E1" />
+                        )}
+                        {isSelected && (
+                          <View style={styles.selectedOverlay}>
+                            <Ionicons name="checkmark" size={14} color="#fff" />
+                          </View>
+                        )}
+                      </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.resultBrand}>{item.brand?.name || 'Marca n/i'}</Text>
-                        <Text style={styles.resultName} numberOfLines={2}>{item.description}</Text>
+                        <Text style={styles.resultBrand}>{item.brand || 'Marca n/i'}</Text>
+                        <Text style={styles.resultName} numberOfLines={2}>{item.name || item.description}</Text>
                         <TouchableOpacity
                           onPress={async (e) => {
                             e.stopPropagation();
                             setSelectedDetailItem(item);
                             setShowModal(true);
-                            // Resolve imagem: Cosmos primeiro, depois Open Food Facts
                             setDetailImage(null);
-                            if (item.thumbnail) {
-                              setDetailImage(item.thumbnail);
+                            if (hasProductImage(item)) {
+                              setDetailImage(imageUrl);
                             } else {
                               setLoadingImage(true);
                               try {
-                                const fallback = await fetchFallbackImage(item.gtin);
+                                const fallback = await fetchFallbackImage(item.barcode || String(item.gtin));
                                 setDetailImage(fallback);
                               } finally {
                                 setLoadingImage(false);
@@ -417,14 +458,37 @@ export default function AddItemScreen() {
                         </TouchableOpacity>
                       </View>
                     </View>
-                    <Text style={styles.resultPrice}>
-                      {item.avg_price ? `R$ ${item.avg_price.toFixed(2)}` : '--'}
-                    </Text>
+                    {isSelected ? (
+                      <View style={styles.qtyStepper}>
+                        <TouchableOpacity
+                          style={styles.qtyBtn}
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            changeItemQuantity(item, -1);
+                          }}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Ionicons name="remove" size={18} color={PRIMARY_GREEN} />
+                        </TouchableOpacity>
+                        <Text style={styles.qtyValue}>{qty}</Text>
+                        <TouchableOpacity
+                          style={styles.qtyBtn}
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            changeItemQuantity(item, 1);
+                          }}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Ionicons name="add" size={18} color={PRIMARY_GREEN} />
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
                   </TouchableOpacity>
                 );
               })}
           </View>
-        )}
+          );
+        })()}
 
 
         {/* Nenhum resultado */}
@@ -437,25 +501,26 @@ export default function AddItemScreen() {
           </View>
         )}
 
-        <TouchableOpacity
-          style={[styles.addButton, (!name.trim() && selectedItems.length === 0) && { opacity: 0.5 }]}
-          onPress={handleAddItem}
-          disabled={(!name.trim() && selectedItems.length === 0) || searching || saving}
-          activeOpacity={0.85}
-        >
-          {saving ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.addButtonText}>
-              {selectedItems.length > 0
-                ? `Adicionar ${selectedItems.length} item${selectedItems.length > 1 ? 's' : ''}`
-                : 'Adicionar à lista'
-              }
-            </Text>
-          )}
-        </TouchableOpacity>
-
       </ScrollView>
+
+      {hasSelection && (
+        <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+          <TouchableOpacity
+            style={styles.addButton}
+            onPress={handleAddItem}
+            disabled={searching || saving}
+            activeOpacity={0.85}
+          >
+            {saving ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.addButtonText}>
+                {`Adicionar ${selectedItems.length} item${selectedItems.length > 1 ? 's' : ''}`}
+              </Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Details Modal */}
       <Modal
@@ -495,35 +560,27 @@ export default function AddItemScreen() {
                 </View>
 
                 <View style={styles.detailInfo}>
-                  <Text style={styles.detailBrand}>{selectedDetailItem.brand?.name || 'Marca não informada'}</Text>
-                  <Text style={styles.detailName}>{selectedDetailItem.description}</Text>
+                  <Text style={styles.detailBrand}>{selectedDetailItem.brand || 'Marca não informada'}</Text>
+                  <Text style={styles.detailName}>{selectedDetailItem.name || selectedDetailItem.description}</Text>
 
-                  <View style={styles.infoRow}>
-                    <View style={styles.infoBox}>
-                      <Text style={styles.infoLabel}>GTIN / EAN</Text>
-                      <Text style={styles.infoValue}>{selectedDetailItem.gtin}</Text>
-                    </View>
-                    <View style={styles.infoBox}>
-                      <Text style={styles.infoLabel}>Preço Médio</Text>
-                      <Text style={[styles.infoValue, { color: PRIMARY_GREEN }]}>
-                        {selectedDetailItem.avg_price ? `R$ ${selectedDetailItem.avg_price.toFixed(2)}` : 'N/A'}
-                      </Text>
-                    </View>
+                  <View style={[styles.infoBox, { marginBottom: 20 }]}>
+                    <Text style={styles.infoLabel}>Código de Barras</Text>
+                    <Text style={styles.infoValue}>{selectedDetailItem.barcode || selectedDetailItem.gtin}</Text>
                   </View>
 
                   <View style={styles.detailSection}>
-                    <Text style={styles.sectionLabel}>Categoria GPC</Text>
+                    <Text style={styles.sectionLabel}>Categoria</Text>
                     <Text style={styles.sectionValue}>
-                      {selectedDetailItem.gpc?.description || 'Não categorizado'}
+                      {selectedDetailItem.category || 'Outros'}
                     </Text>
                   </View>
 
-                  <View style={styles.detailSection}>
-                    <Text style={styles.sectionLabel}>NCM</Text>
-                    <Text style={styles.sectionValue}>
-                      {selectedDetailItem.ncm?.code} - {selectedDetailItem.ncm?.description}
-                    </Text>
-                  </View>
+                  {selectedDetailItem.quantity ? (
+                    <View style={styles.detailSection}>
+                      <Text style={styles.sectionLabel}>Quantidade / Tamanho</Text>
+                      <Text style={styles.sectionValue}>{selectedDetailItem.quantity}</Text>
+                    </View>
+                  ) : null}
                 </View>
 
                 <TouchableOpacity
@@ -534,13 +591,47 @@ export default function AddItemScreen() {
                   }}
                 >
                   <Text style={styles.modalAddBtnText}>
-                    {selectedItems.some(i => i.gtin === selectedDetailItem.gtin)
+                    {selectedItems.some((i) => itemKey(i) === itemKey(selectedDetailItem))
                       ? 'Remover da seleção'
                       : 'Selecionar este produto'}
                   </Text>
                 </TouchableOpacity>
               </ScrollView>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal de permissão de localização */}
+      <Modal
+        visible={locationModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setLocationModal(false)}
+      >
+        <View style={styles.locModalOverlay}>
+          <View style={styles.locModalCard}>
+            <View style={styles.locModalIconBg}>
+              <Ionicons name="location" size={36} color={PRIMARY_GREEN} />
+            </View>
+            <Text style={styles.locModalTitle}>Filtrar por Região</Text>
+            <Text style={styles.locModalDesc}>
+              Permita o acesso à sua localização para que a IA possa priorizar marcas e produtos mais comuns na sua região.
+            </Text>
+            <TouchableOpacity
+              style={styles.locModalBtn}
+              onPress={handleRequestLocation}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="location-outline" size={18} color="#fff" />
+              <Text style={styles.locModalBtnText}>Permitir Localização</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.locModalSkip}
+              onPress={() => setLocationModal(false)}
+            >
+              <Text style={styles.locModalSkipText}>Agora não</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -584,19 +675,6 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     paddingHorizontal: 15,
     height: 52,
-  },
-  priceInputWrapper: {
-    marginTop: 10,
-  },
-  inputRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  priceInput: {
-    flex: 1,
-  },
-  quantityInput: {
-    width: 118,
   },
   inputIcon: {
     marginRight: 10,
@@ -647,11 +725,51 @@ const styles = StyleSheet.create({
   filterTextActive: {
     color: PRIMARY_GREEN,
   },
+  resultsScroll: {
+    flex: 1,
+  },
   scrollContent: {
     paddingHorizontal: 20,
     paddingTop: 24,
-    paddingBottom: 50,
-    minHeight: height * 0.6,
+    paddingBottom: 24,
+  },
+  footer: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    backgroundColor: '#fff',
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  qtyStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+  },
+  qtyBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  qtyValue: {
+    minWidth: 28,
+    textAlign: 'center',
+    fontSize: 16,
+    fontWeight: '800',
+    color: TEXT_DARK,
+    marginHorizontal: 4,
   },
   loaderContainer: {
     alignItems: 'center',
@@ -687,6 +805,13 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: 15,
   },
+  filterEmptyText: {
+    fontSize: 13,
+    color: TEXT_GRAY,
+    fontWeight: '600',
+    marginBottom: 16,
+    lineHeight: 20,
+  },
   resultItem: {
     backgroundColor: '#fff',
     borderRadius: 20,
@@ -704,14 +829,8 @@ const styles = StyleSheet.create({
   },
   resultLeft: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     flex: 1,
-  },
-  statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    marginRight: 12,
   },
   resultBrand: {
     fontSize: 10,
@@ -725,11 +844,6 @@ const styles = StyleSheet.create({
     color: TEXT_DARK,
     width: '85%',
   },
-  resultPrice: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: TEXT_GRAY,
-  },
   addButton: {
     backgroundColor: PRIMARY_GREEN,
     height: 56,
@@ -741,7 +855,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 10,
     elevation: 5,
-    marginTop: 10,
   },
   addButtonText: {
     color: '#fff',
@@ -871,5 +984,116 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '800',
+  },
+  // Location badge no header
+  locationBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    gap: 4,
+  },
+  locationBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.85)',
+  },
+  // Thumbnail no card de resultado
+  resultThumb: {
+    width: 50,
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  resultThumbImg: {
+    width: '100%',
+    height: '100%',
+  },
+  selectedOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: PRIMARY_GREEN + 'CC',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  // Modal de permissão de localização
+  locModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 30,
+  },
+  locModalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 32,
+    padding: 30,
+    alignItems: 'center',
+    width: '100%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  locModalIconBg: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#F0FDF4',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  locModalTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  locModalDesc: {
+    fontSize: 14,
+    color: TEXT_GRAY,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 28,
+  },
+  locModalBtn: {
+    backgroundColor: PRIMARY_GREEN,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    height: 52,
+    borderRadius: 26,
+    width: '100%',
+    marginBottom: 12,
+  },
+  locModalBtnText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  locModalSkip: {
+    paddingVertical: 8,
+  },
+  locModalSkipText: {
+    fontSize: 13,
+    color: TEXT_GRAY,
+    fontWeight: '600',
   },
 });

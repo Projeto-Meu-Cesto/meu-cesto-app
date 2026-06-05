@@ -1,14 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { collection, getDocs, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Animated,
   Dimensions,
   Modal,
-  Platform,
   Pressable,
-  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -16,18 +14,13 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { auth, db } from '../../scripts/firebaseConfig';
+import { PullToRefreshScroll } from '../../components/PullToRefreshScroll';
+import { BG_LIGHT, PRIMARY_GREEN, STATUS_BAR_HEIGHT, TEXT_DARK, TEXT_GRAY, WARNING } from '../../constants/theme';
 import { getCachedPurchases, mergePurchaseRecords, type PurchaseRecord } from '../../scripts/financeContext';
+import { auth, db } from '../../scripts/firebaseConfig';
+import { getItemTotal, getQuantity, parseMoney, toDate, toMonthKey, wait } from '../../scripts/utils';
 
-const { width } = Dimensions.get('window');
-const STATUS_BAR_HEIGHT = Platform.OS === 'android'
-  ? (StatusBar.currentHeight ?? 24)
-  : 54; // Aumentado para cobrir Dynamic Island e notch iPhone
-const PRIMARY_GREEN = '#00A36C';
-const BG_LIGHT = '#F8FAFC';
-const TEXT_DARK = '#1E293B';
-const TEXT_GRAY = '#64748B';
-const WARNING = '#F59E0B';
+const { width, height: windowHeight } = Dimensions.get('window');
 const HOME_LOAD_TIMEOUT_MS = 4500;
 
 type ShoppingListItem = {
@@ -61,30 +54,10 @@ type ListSummary = {
   confirmed: number;
 };
 
-function parseMoney(value: string | number | undefined) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
-  if (!value) return 0;
-
-  const normalized = value
-    .replace(/[^\d,.-]/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.');
-
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function getQuantity(value: string | number | undefined) {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0 ? value : 1;
-  }
-
-  const parsed = Number.parseInt(String(value || '1'), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
-}
-
-function getItemTotal(item: Pick<ShoppingListItem, 'price' | 'quantity'>) {
-  return parseMoney(item.price) * getQuantity(item.quantity);
+type Greeting = {
+  morning: string,
+  afternoon: string,
+  evening: string,
 }
 
 function getPurchaseItemTotal(item: NonNullable<PurchaseRecord['items']>[number]) {
@@ -93,21 +66,6 @@ function getPurchaseItemTotal(item: NonNullable<PurchaseRecord['items']>[number]
   }
 
   return parseMoney(item.price) * getQuantity(item.quantity);
-}
-
-function toDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value.toDate === 'function') return value.toDate();
-  if (typeof value.seconds === 'number') return new Date(value.seconds * 1000);
-
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function toMonthKey(date: Date) {
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  return `${date.getFullYear()}-${month}`;
 }
 
 function buildListSummary(items: ShoppingListItem[], purchases: PurchaseRecord[]): ListSummary {
@@ -193,6 +151,26 @@ function SkeletonListItem() {
   );
 }
 
+function SkeletonMainCard() {
+  return (
+    <View style={styles.mainCard}>
+      <SkeletonBox width={130} height={13} style={skStyles.onGreen} />
+      <SkeletonBox width={200} height={36} style={[skStyles.onGreen, { marginTop: 10 }]} />
+      <SkeletonBox width={220} height={12} style={[skStyles.onGreen, { marginTop: 10 }]} />
+    </View>
+  );
+}
+
+function SkeletonQuickCard() {
+  return (
+    <View style={styles.catCard}>
+      <SkeletonBox width={40} height={40} style={{ borderRadius: 12, marginBottom: 8 }} />
+      <SkeletonBox width={56} height={10} style={{ marginBottom: 6 }} />
+      <SkeletonBox width={48} height={14} />
+    </View>
+  );
+}
+
 const skStyles = StyleSheet.create({
   row: {
     flexDirection: 'row',
@@ -201,6 +179,9 @@ const skStyles = StyleSheet.create({
     borderRadius: 18,
     padding: 16,
     marginBottom: 10,
+  },
+  onGreen: {
+    backgroundColor: 'rgba(255, 255, 255, 0.35)',
   },
 });
 
@@ -219,12 +200,46 @@ export default function HomeScreen() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notificationsSeen, setNotificationsSeen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [dataVersion, setDataVersion] = useState(0);
 
-  const onRefresh = React.useCallback(() => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1500);
-  }, []);
+  const showSkeleton = loading || isRefreshing;
+
+  const refreshHomeData = React.useCallback(async () => {
+    if (!user) return;
+
+    const shoppingQuery = query(
+      collection(db, 'users', user.uid, 'shopping_list'),
+      orderBy('createdAt', 'desc')
+    );
+    const purchasesQuery = query(
+      collection(db, 'users', user.uid, 'purchases'),
+      orderBy('finalizedAt', 'desc'),
+      limit(120)
+    );
+
+    const [listSnap, purchasesSnap, cachedPurchases] = await Promise.all([
+      getDocs(shoppingQuery),
+      getDocs(purchasesQuery),
+      getCachedPurchases(user.uid),
+    ]);
+
+    const shoppingItems = listSnap.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    })) as ShoppingListItem[];
+
+    const firestorePurchases = purchasesSnap.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    })) as PurchaseRecord[];
+
+    const purchases = mergePurchaseRecords(firestorePurchases, cachedPurchases);
+    setWeeklyList(shoppingItems.slice(0, 4));
+    setListSummary(buildListSummary(shoppingItems, purchases));
+    setDataVersion((v) => v + 1);
+    await wait(350);
+  }, [user]);
 
   useEffect(() => {
     if (!user) {
@@ -316,7 +331,7 @@ export default function HomeScreen() {
       unsubList();
       unsubPurchases();
     };
-  }, [user]);
+  }, [user, dataVersion]);
 
   const notifications = useMemo<HomeNotification[]>(() => {
     const totalSpent = listSummary.spent;
@@ -389,28 +404,35 @@ export default function HomeScreen() {
     notification.action?.();
   };
 
+  const greeting = (greeting: Greeting) => {
+    const hour = new Date().getHours();
+    if (hour < 12) {
+      return greeting.morning;
+    }
+    if (hour < 18) {
+      return greeting.afternoon;
+    }
+    return greeting.evening;
+  }
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
 
-      <ScrollView
+      <PullToRefreshScroll
+        lockScrollDown
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={PRIMARY_GREEN}
-            colors={[PRIMARY_GREEN]}
-            progressViewOffset={STATUS_BAR_HEIGHT + 70}
-          />
-        }
+        contentContainerStyle={[styles.scrollContent, { minHeight: windowHeight }]}
+        refreshOffset={STATUS_BAR_HEIGHT + 8}
+        backgroundColor={PRIMARY_GREEN}
+        onRefreshingChange={setIsRefreshing}
+        onRefresh={refreshHomeData}
       >
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerTop}>
             <View>
-              <Text style={styles.greeting}>Bom dia,</Text>
+              <Text style={styles.greeting}>{greeting({ morning: 'Bom dia', afternoon: 'Boa tarde', evening: 'Boa noite' })},</Text>
               <Text style={styles.userName}>{user?.displayName || 'Usuário'}</Text>
             </View>
             <TouchableOpacity
@@ -425,21 +447,33 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.mainCard}>
-            <Text style={styles.mainCardLabel}>Gasto confirmado</Text>
-            <Text style={styles.mainCardAmount}>{formatCurrency(listSummary.spent)}</Text>
-            <Text style={styles.mainCardSubtitle}>
-              {listSummary.confirmed} item(ns) confirmados neste mês
-            </Text>
-          </View>
+          {showSkeleton ? (
+            <SkeletonMainCard />
+          ) : (
+            <View style={styles.mainCard}>
+              <Text style={styles.mainCardLabel}>Gasto confirmado</Text>
+              <Text style={styles.mainCardAmount}>{formatCurrency(listSummary.spent)}</Text>
+              <Text style={styles.mainCardSubtitle}>
+                {listSummary.confirmed} item(ns) confirmados neste mês
+              </Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.mainContent}>
           {/* Categories */}
           <View style={styles.categoriesRow}>
-            {quickCards.map((cat) => (
-              <CategoryCard key={cat.id} icon={cat.icon} label={cat.label} value={cat.value} />
-            ))}
+            {showSkeleton ? (
+              <>
+                <SkeletonQuickCard />
+                <SkeletonQuickCard />
+                <SkeletonQuickCard />
+              </>
+            ) : (
+              quickCards.map((cat) => (
+                <CategoryCard key={cat.id} icon={cat.icon} label={cat.label} value={cat.value} />
+              ))
+            )}
           </View>
 
           {/* Weekly List */}
@@ -451,7 +485,7 @@ export default function HomeScreen() {
           </View>
 
           <View style={styles.listContainer}>
-            {loading ? (
+            {showSkeleton ? (
               <>
                 <SkeletonListItem />
                 <SkeletonListItem />
@@ -489,7 +523,7 @@ export default function HomeScreen() {
             <Ionicons name="chevron-forward" size={20} color={PRIMARY_GREEN} />
           </TouchableOpacity>
         </View>
-      </ScrollView>
+      </PullToRefreshScroll>
 
       <Modal visible={notificationsOpen} transparent animationType="fade" onRequestClose={closeNotifications}>
         <View style={styles.modalOverlay}>
@@ -574,11 +608,10 @@ function ListItem({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: BG_LIGHT,
+    backgroundColor: PRIMARY_GREEN,
   },
   scrollContent: {
-    paddingBottom: 130,
-    backgroundColor: BG_LIGHT,
+    flexGrow: 1,
   },
   header: {
     backgroundColor: PRIMARY_GREEN,
@@ -648,8 +681,14 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   mainContent: {
+    flex: 1,
     paddingHorizontal: 20,
     paddingTop: 25,
+    paddingBottom: 100,
+    backgroundColor: BG_LIGHT,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    minHeight: 600,
   },
   categoriesRow: {
     flexDirection: 'row',

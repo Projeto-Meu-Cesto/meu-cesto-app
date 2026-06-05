@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { collection, onSnapshot, orderBy, query, limit } from 'firebase/firestore';
 import React from 'react';
 import {
   Animated,
@@ -16,22 +16,28 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { auth, db } from '../../scripts/firebaseConfig';
 import { getCachedPurchases, mergePurchaseRecords, type PurchaseItem, type PurchaseRecord } from '../../scripts/financeContext';
+import { auth, db } from '../../scripts/firebaseConfig';
+import { STATUS_BAR_HEIGHT, PRIMARY_GREEN, BG_LIGHT, TEXT_DARK, TEXT_GRAY } from '../../constants/theme';
+import {
+  parseMoney,
+  getQuantity,
+  getItemTotal as getShoppingItemTotal,
+  toDate,
+  toMonthKey,
+  fromMonthKey,
+  shiftMonth,
+  formatMonth,
+  formatCurrency,
+  normalizeText,
+} from '../../scripts/utils';
 
 const { width } = Dimensions.get('window');
-const STATUS_BAR_HEIGHT = Platform.OS === 'android'
-  ? (StatusBar.currentHeight ?? 24)
-  : 54;
-const PRIMARY_GREEN = '#00A36C';
-const BG_LIGHT = '#F8FAFC';
-const TEXT_DARK = '#1E293B';
-const TEXT_GRAY = '#64748B';
 const WARNING = '#F59E0B';
 const CACHE_PREFIX = '@meu-cesto:monthly-history:';
 const STATS_LOAD_TIMEOUT_MS = 5500;
 
-type CategoryName = 'Alimentação' | 'Transporte' | 'Outros';
+type CategoryName = 'Frutas' | 'Laticínios' | 'Limpeza' | 'Higiene' | 'Bebidas' | 'Padaria' | 'Carnes' | 'Outros';
 
 type MonthlySummary = {
   monthKey: string;
@@ -53,7 +59,18 @@ type ShoppingItem = {
 
 
 
-const CATEGORY_NAMES: CategoryName[] = ['Alimentação', 'Transporte', 'Outros'];
+const CATEGORY_NAMES: CategoryName[] = ['Frutas', 'Laticínios', 'Limpeza', 'Higiene', 'Bebidas', 'Padaria', 'Carnes', 'Outros'];
+
+const CATEGORY_COLORS: Record<CategoryName, string> = {
+  Frutas: '#F59E0B',
+  'Laticínios': '#3B82F6',
+  Limpeza: '#8B5CF6',
+  Higiene: '#EC4899',
+  Bebidas: '#06B6D4',
+  Padaria: '#D97706',
+  Carnes: '#EF4444',
+  Outros: '#94A3B8',
+};
 
 function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
   const opacity = React.useRef(new Animated.Value(0.4)).current;
@@ -76,8 +93,13 @@ function SkeletonBox({ width: w, height: h, style }: { width?: any; height: numb
 
 function emptyCategories(): Record<CategoryName, number> {
   return {
-    Alimentação: 0,
-    Transporte: 0,
+    Frutas: 0,
+    'Laticínios': 0,
+    Limpeza: 0,
+    Higiene: 0,
+    Bebidas: 0,
+    Padaria: 0,
+    Carnes: 0,
     Outros: 0,
   };
 }
@@ -91,35 +113,6 @@ function createEmptySummary(monthKey: string): MonthlySummary {
   };
 }
 
-function parseMoney(value: string | number | undefined): number {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : 0;
-  }
-
-  if (!value) return 0;
-
-  const normalized = String(value)
-    .replace(/[^\d,.-]/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.');
-
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function getQuantity(value: string | number | undefined): number {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0 ? value : 1;
-  }
-
-  const parsed = Number.parseInt(String(value || '1'), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
-}
-
-function getShoppingItemTotal(item: Pick<ShoppingItem, 'price' | 'quantity'>): number {
-  return parseMoney(item.price) * getQuantity(item.quantity);
-}
-
 function getPurchaseItemTotal(item: PurchaseItem): number {
   if (typeof item.total === 'number' && Number.isFinite(item.total)) {
     return item.total;
@@ -128,81 +121,16 @@ function getPurchaseItemTotal(item: PurchaseItem): number {
   return parseMoney(item.price) * getQuantity(item.quantity);
 }
 
-function toDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value.toDate === 'function') return value.toDate();
-  if (typeof value.seconds === 'number') return new Date(value.seconds * 1000);
-
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function toMonthKey(date: Date): string {
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  return `${date.getFullYear()}-${month}`;
-}
-
-function fromMonthKey(monthKey: string): Date {
-  const [year, month] = monthKey.split('-').map(Number);
-  return new Date(year, month - 1, 1);
-}
-
-function shiftMonth(monthKey: string, amount: number): string {
-  const date = fromMonthKey(monthKey);
-  date.setMonth(date.getMonth() + amount);
-  return toMonthKey(date);
-}
-
-function formatMonth(monthKey: string, style: 'long' | 'short' = 'long'): string {
-  const formatted = new Intl.DateTimeFormat('pt-BR', {
-    month: style,
-    year: style === 'long' ? 'numeric' : undefined,
-  }).format(fromMonthKey(monthKey));
-
-  return formatted.charAt(0).toUpperCase() + formatted.slice(1);
-}
-
-function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('pt-BR', {
-    style: 'currency',
-    currency: 'BRL',
-  }).format(value);
-}
-
-function normalizeText(value: string): string {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-}
-
 function normalizeCategory(category?: string, itemName?: string): CategoryName {
   const raw = normalizeText(`${category ?? ''} ${itemName ?? ''}`);
 
-  if (
-    raw.includes('transporte') ||
-    raw.includes('uber') ||
-    raw.includes('onibus') ||
-    raw.includes('gasolina') ||
-    raw.includes('combustivel')
-  ) {
-    return 'Transporte';
-  }
-
-  if (
-    raw.includes('aliment') ||
-    raw.includes('mercado') ||
-    raw.includes('fruta') ||
-    raw.includes('bebida') ||
-    raw.includes('padaria') ||
-    raw.includes('carne') ||
-    raw.includes('leite') ||
-    raw.includes('arroz') ||
-    raw.includes('feijao')
-  ) {
-    return 'Alimentação';
-  }
+  if (/(banana|maca|maça|uva|morango|laranja|limao|abacaxi|mamao|melancia|fruta)/.test(raw)) return 'Frutas';
+  if (/(leite|queijo|iogurte|manteiga|requeijao|laticinio)/.test(raw)) return 'Laticínios';
+  if (/(detergente|sabao|amaciante|limpador|desinfetante|esponja|cloro|sanitaria)/.test(raw)) return 'Limpeza';
+  if (/(shampoo|sabonete|pasta|escova|desodorante|absorvente)/.test(raw)) return 'Higiene';
+  if (/(agua|suco|refrigerante|cerveja|vinho|cafe|cha|energetico|bebida)/.test(raw)) return 'Bebidas';
+  if (/(pao|bolo|biscoito|bolacha|rosca|baguete|padaria)/.test(raw)) return 'Padaria';
+  if (/(carne|frango|peixe|linguica|presunto|salame|bife|costela)/.test(raw)) return 'Carnes';
 
   return 'Outros';
 }
@@ -350,7 +278,8 @@ export default function StatsScreen() {
     );
     const purchasesQuery = query(
       collection(db, 'users', user.uid, 'purchases'),
-      orderBy('finalizedAt', 'desc')
+      orderBy('finalizedAt', 'desc'),
+      limit(120)
     );
     const publishHistory = async () => {
       if (!active || !shoppingLoaded || !purchasesLoaded) return;
@@ -546,13 +475,13 @@ export default function StatsScreen() {
 
             <Text style={styles.sectionTitle}>POR CATEGORIA</Text>
             <View style={styles.categoriesGrid}>
-              {CATEGORY_NAMES.slice(0, 2).map((name) => (
+              {CATEGORY_NAMES.slice(0, CATEGORY_NAMES.length - 1).map((name) => (
                 <ProgressCard
                   key={name}
                   label={name}
                   value={formatCurrency(selectedSummary.categories[name])}
                   progress={selectedSummary.categories[name] / maxCategoryTotal}
-                  color={PRIMARY_GREEN}
+                  color={CATEGORY_COLORS[name]}
                 />
               ))}
             </View>
@@ -908,12 +837,12 @@ const styles = StyleSheet.create({
   },
   categoriesGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexWrap: 'wrap',
     gap: 15,
     marginBottom: 15,
   },
   miniCard: {
-    flex: 1,
+    width: (width - 50 - 15) / 2,
     backgroundColor: '#fff',
     borderRadius: 20,
     padding: 16,

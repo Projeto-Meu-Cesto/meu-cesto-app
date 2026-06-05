@@ -18,6 +18,18 @@ service cloud.firestore {
       allow read, write: if isOwner(userId);
     }
 
+    // Cache de produtos (Open Food Facts) — leitura pública para autenticados,
+    // escrita permitida apenas para usuários autenticados com campos válidos.
+    match /product_cache/{barcode} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'barcode', 'name', 'name_lower', 'brand', 'quantity', 'image_url',
+          'category', 'avg_price', 'source', 'cached_at',
+          'gtin', 'description', 'thumbnail', 'brand_name'
+        ]);
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
