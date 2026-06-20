@@ -13,8 +13,7 @@ import Animated, {
   interpolateColor,
   useAnimatedStyle,
   useSharedValue,
-  withSpring,
-  withTiming,
+  withTiming
 } from 'react-native-reanimated';
 import {
   AUTH_BORDER_GRAY,
@@ -52,7 +51,6 @@ export function AuthAnimatedInput({
   const animatedWrapperStyle = useAnimatedStyle(() => ({
     borderColor: interpolateColor(focusAnim.value, [0, 1], [AUTH_BORDER_GRAY, AUTH_PRIMARY_GREEN]),
     borderWidth: withTiming(isFocused ? 2 : 1.5),
-    transform: [{ scale: withSpring(isFocused ? 1.01 : 1, { damping: 18 }) }],
     backgroundColor: interpolateColor(focusAnim.value, [0, 1], ['#FAFAFA', '#FFFFFF']),
     shadowOpacity: withTiming(isFocused ? 0.12 : 0.04),
     elevation: withTiming(isFocused ? 3 : 1),

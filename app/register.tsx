@@ -20,8 +20,8 @@ import {
   AUTH_TEXT_GRAY,
 } from '../components/auth/authTheme';
 import { useAuthLayout } from '../components/auth/useAuthLayout';
-import { requestAppTourSession } from '../context/tourSession';
 import { useToast } from '../context/ToastContext';
+import { requestAppTourSession } from '../context/tourSession';
 import { auth, isFirebaseConfigured } from '../scripts/firebaseConfig';
 import { markAppTourPending } from '../scripts/tourStorage';
 
@@ -96,7 +96,7 @@ export default function RegisterScreen() {
     isPasswordValid(password, confirmPassword);
 
   return (
-    <AuthScreenShell>
+    <AuthScreenShell contentStyle={{ }}>
       <View style={[styles.page, { maxWidth: layout.maxFormWidth, width: '100%', alignSelf: 'center' }]}>
         <View style={styles.headerRow}>
           <TouchableOpacity

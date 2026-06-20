@@ -1,12 +1,9 @@
 import React from 'react';
 import {
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
   StatusBar,
   StyleSheet,
   View,
-  ViewStyle,
+  ViewStyle
 } from 'react-native';
 import { useAuthLayout } from './useAuthLayout';
 
@@ -16,35 +13,32 @@ type AuthScreenShellProps = {
   centerContent?: boolean;
 };
 
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+
 export function AuthScreenShell({ children, contentStyle, centerContent = false }: AuthScreenShellProps) {
   const layout = useAuthLayout();
-
   return (
     <View style={styles.container}>
       <StatusBar barStyle="dark-content" />
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.flex}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
-      >
-        <ScrollView
-          contentContainerStyle={[
-            styles.scroll,
-            {
-              paddingHorizontal: layout.horizontalPad,
-              paddingTop: layout.paddingTop,
-              paddingBottom: layout.paddingBottom,
-            },
-            centerContent && styles.scrollCentered,
-            contentStyle,
-          ]}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-          bounces={false}
-        >
-          {children}
-        </ScrollView>
-      </KeyboardAvoidingView>
+      <KeyboardAwareScrollView
+  contentContainerStyle={[
+    styles.scroll,
+    {
+      paddingHorizontal: layout.horizontalPad,
+      paddingTop: layout.paddingTop,
+      paddingBottom: layout.paddingBottom + 240, // era +40
+    },
+    centerContent && styles.scrollCentered,
+    contentStyle,
+  ]}
+  keyboardShouldPersistTaps="handled"
+  showsVerticalScrollIndicator={false}
+  bounces={false}
+  enableOnAndroid
+  extraScrollHeight={120} // era 20
+>
+        {children}
+      </KeyboardAwareScrollView>
     </View>
   );
 }

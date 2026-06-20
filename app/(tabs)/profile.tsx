@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
@@ -32,10 +33,11 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { auth, db } from '../../scripts/firebaseConfig';
 import { formatLocationLabel, getCachedLocation, requestUserLocation } from '../../scripts/locationService';
 
+ 
 const PRIMARY_GREEN = '#00A36C';
 const BG_LIGHT = '#F8FAFC';
 const TEXT_DARK = '#1E293B';
@@ -76,6 +78,7 @@ export default function ProfileScreen() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [locationFilterEnabled, setLocationFilterEnabled] = useState(true);
   const [currentLocationLabel, setCurrentLocationLabel] = useState('');
+  const insets = useSafeAreaInsets();
 
   const userUid = user?.uid;
   const profileRef = useMemo(
@@ -335,6 +338,8 @@ export default function ProfileScreen() {
     }
   };
 
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+
   const handleLogout = async () => {
     try {
       await signOut(auth);
@@ -344,22 +349,6 @@ export default function ProfileScreen() {
     }
   };
 
-  const confirmLogout = () => {
-    if (Platform.OS === 'web') {
-      const confirmed = typeof window === 'undefined' ? true : window.confirm('Deseja realmente encerrar sua sessão?');
-      if (confirmed) handleLogout();
-      return;
-    }
-
-    Alert.alert(
-      'Sair',
-      'Deseja realmente encerrar sua sessão?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        { text: 'Sair', style: 'destructive', onPress: handleLogout },
-      ]
-    );
-  };
 
   const openSupportEmail = () => {
     const subject = encodeURIComponent('Suporte Meu Cesto');
@@ -415,7 +404,7 @@ export default function ProfileScreen() {
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
 
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 14 }]}>
         <View style={styles.headerTop}>
           <Text style={styles.headerTitle}>Perfil</Text>
         </View>
@@ -454,7 +443,7 @@ export default function ProfileScreen() {
             title="Sair"
             color={DANGER}
             isLast
-            onPress={confirmLogout}
+            onPress={() => setShowLogoutModal(true)}
           />
         </View>
 
@@ -609,6 +598,47 @@ export default function ProfileScreen() {
           <Text style={styles.supportButtonText}>Falar com suporte</Text>
         </TouchableOpacity>
       </ModalShell>
+
+      <Modal
+        visible={showLogoutModal}
+        transparent
+        animationType="fade"
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
+        onRequestClose={() => setShowLogoutModal(false)}
+      >
+        <View style={styles.logoutOverlay}>
+          <View style={styles.logoutCard}>
+            <View style={styles.logoutIconBox}>
+              <Ionicons name="log-out-outline" size={28} color={DANGER} />
+            </View>
+
+            <Text style={styles.logoutTitle}>Sair</Text>
+            <Text style={styles.logoutText}>Deseja realmente encerrar sua sessão?</Text>
+
+            <View style={styles.logoutActions}>
+              <TouchableOpacity
+                style={styles.logoutCancelButton}
+                onPress={() => setShowLogoutModal(false)}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.logoutCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.logoutConfirmButton}
+                onPress={async () => {
+                  setShowLogoutModal(false);
+                  await handleLogout();
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.logoutConfirmText}>Sair</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -775,7 +805,6 @@ const styles = StyleSheet.create({
   header: {
     backgroundColor: PRIMARY_GREEN,
     paddingHorizontal: 25,
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) + 14 : 64,
     paddingBottom: 20,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
@@ -1135,5 +1164,80 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: TEXT_GRAY,
     fontWeight: '700',
+  },
+
+  logoutOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  logoutCard: {
+    width: '100%',
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.16,
+    shadowRadius: 24,
+    elevation: 8,
+  },
+  logoutIconBox: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: '#FEE2E2',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
+  },
+  logoutTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  logoutText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: TEXT_GRAY,
+    lineHeight: 21,
+    marginBottom: 24,
+    textAlign: 'center',
+  },
+  logoutActions: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  logoutCancelButton: {
+    flex: 1,
+    height: 52,
+    borderRadius: 18,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoutCancelText: {
+    color: TEXT_DARK,
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  logoutConfirmButton: {
+    flex: 1,
+    height: 52,
+    borderRadius: 18,
+    backgroundColor: DANGER,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoutConfirmText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '900',
   },
 });

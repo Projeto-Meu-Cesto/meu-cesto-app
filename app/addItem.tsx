@@ -1,13 +1,12 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-import { addDoc, collection, Timestamp } from 'firebase/firestore';
+import { Timestamp, addDoc, collection } from 'firebase/firestore';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Image,
-  KeyboardAvoidingView,
   Linking,
   Modal,
   Platform,
@@ -17,17 +16,18 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  BG_LIGHT,
+  PRIMARY_GREEN,
+  STATUS_BAR_HEIGHT_SM as STATUS_BAR_HEIGHT,
+  TEXT_DARK,
+  TEXT_GRAY,
+} from '../constants/theme';
 import { useToast } from '../context/ToastContext';
 import { categorizeProductLocal, filterProductsByRegionWithAI } from '../scripts/aiService';
-import {
-  Product,
-  fetchFallbackImage,
-  fetchProductsByName,
-  getProductImageUrl,
-  hasProductImage,
-} from '../scripts/productService';
 import { auth, db } from '../scripts/firebaseConfig';
 import {
   UserLocation,
@@ -36,15 +36,14 @@ import {
   getCachedLocation,
   requestUserLocation,
 } from '../scripts/locationService';
-import { wait } from '../scripts/utils';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  PRIMARY_GREEN,
-  BG_LIGHT,
-  TEXT_DARK,
-  TEXT_GRAY,
-  STATUS_BAR_HEIGHT_SM as STATUS_BAR_HEIGHT,
-} from '../constants/theme';
+  Product,
+  fetchFallbackImage,
+  fetchProductsByName,
+  getProductImageUrl,
+  hasProductImage,
+} from '../scripts/productService';
+import { wait } from '../scripts/utils';
 
 const SAVE_TIMEOUT_MS = 1400;
 
@@ -140,9 +139,6 @@ export default function AddItemScreen() {
     }
   }, [showToast]);
 
-  // Busca automática com debounce de 600ms
-  // BUG FIX: userLocation adicionado às dependências — antes o filtro regional
-  // não era reaplicado quando a localização era carregada após o nome já digitado.
   useEffect(() => {
     let isActive = true;
 
@@ -157,13 +153,11 @@ export default function AddItemScreen() {
       setSearching(true);
       try {
         const searchTerm = name.trim();
-        // fetchProductsByName já faz Firestore cache-first + Open Food Facts
         const data = await fetchProductsByName(searchTerm);
 
         let finalResults = data || [];
         if (userLocation && finalResults.length > 0) {
           try {
-            // Só executa o filtro se a busca não foi cancelada
             if (isActive) {
               finalResults = await filterProductsByRegionWithAI(finalResults, userLocation);
             }
@@ -244,26 +238,26 @@ export default function AddItemScreen() {
       const payloads: ItemPayload[] = [];
 
       selectedItems.forEach((item) => {
-          const itemName = normalizeProductNameTyping(item.name || item.description);
-          const imageUrl = getProductImageUrl(item);
-          const itemToAdd = {
-            name: itemName,
-            price: '',
-            quantity: getItemQuantity(item),
-            brand: item.brand || '',
-            thumbnail: hasProductImage(item) ? imageUrl : '',
-          };
+        const itemName = normalizeProductNameTyping(item.name || item.description);
+        const imageUrl = getProductImageUrl(item);
+        const itemToAdd = {
+          name: itemName,
+          price: '',
+          quantity: getItemQuantity(item),
+          brand: item.brand || '',
+          thumbnail: hasProductImage(item) ? imageUrl : '',
+        };
 
-          const category = categorizeProductLocal(itemName);
+        const category = categorizeProductLocal(itemName);
 
-          payloads.push({
-            ...itemToAdd,
-            checked: false,
-            category: category,
-            createdAt: Timestamp.now(),
-            checkedAt: null,
-          });
+        payloads.push({
+          ...itemToAdd,
+          checked: false,
+          category: category,
+          createdAt: Timestamp.now(),
+          checkedAt: null,
         });
+      });
 
       const writes = payloads.map((payload) =>
         addDoc(collection(db, 'users', user.uid, 'shopping_list'), payload)
@@ -314,11 +308,7 @@ export default function AddItemScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-    >
+    <View style={styles.container} >
       <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
 
       <View style={styles.header}>
@@ -394,14 +384,14 @@ export default function AddItemScreen() {
           });
 
           return (
-          <View style={styles.resultsContainer}>
-            <Text style={styles.resultsTitle}>RESULTADOS ENCONTRADOS</Text>
-            {filtered.length === 0 ? (
-              <Text style={styles.filterEmptyText}>
-                Nenhum resultado em &quot;{activeFilter}&quot;. Troque o filtro ou refine a busca.
-              </Text>
-            ) : null}
-            {filtered.map((item) => {
+            <View style={styles.resultsContainer}>
+              <Text style={styles.resultsTitle}>RESULTADOS ENCONTRADOS</Text>
+              {filtered.length === 0 ? (
+                <Text style={styles.filterEmptyText}>
+                  Nenhum resultado em &quot;{activeFilter}&quot;. Troque o filtro ou refine a busca.
+                </Text>
+              ) : null}
+              {filtered.map((item) => {
                 const key = itemKey(item);
                 const isSelected = selectedItems.some((i) => itemKey(i) === key);
                 const imageUrl = getProductImageUrl(item);
@@ -486,7 +476,7 @@ export default function AddItemScreen() {
                   </TouchableOpacity>
                 );
               })}
-          </View>
+            </View>
           );
         })()}
 
@@ -635,7 +625,7 @@ export default function AddItemScreen() {
           </View>
         </View>
       </Modal>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
