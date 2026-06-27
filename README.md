@@ -72,3 +72,4 @@ npx expo export --platform web
 ## Observação sobre ambiente
 
 O app não inclui credenciais reais no repositório. Caso as variáveis do Firebase não estejam configuradas, a interface continua carregando, mas login, cadastro e dados em tempo real dependem do `.env` preenchido corretamente.
+# Lead-The-Dragon-Fanpage
