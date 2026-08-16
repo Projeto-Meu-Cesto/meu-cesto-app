@@ -1,0 +1,63 @@
+import type { CatalogProduct } from '../domain/catalog';
+
+export const demoMarket = {
+  id: 'demo-market',
+  name: 'Mercado Parceiro — Demonstração',
+  isDemo: true,
+  updatedAt: '2026-08-08T00:00:00.000Z',
+};
+
+const product = (
+  id: string,
+  name: string,
+  category: string,
+  unit: string,
+  price: number,
+  stockQuantity: number,
+  brand?: string,
+  barcode?: string,
+): CatalogProduct => ({
+  id,
+  marketId: demoMarket.id,
+  barcode,
+  name,
+  brand,
+  category,
+  unit,
+  price,
+  stockQuantity,
+  available: stockQuantity > 0,
+  imageUrl: null,
+  updatedAt: demoMarket.updatedAt,
+});
+
+export const demoCatalog: CatalogProduct[] = [
+  product('arroz-5kg', 'Arroz tipo 1 5 kg', 'Mercearia', 'pacote', 24.9, 18, 'Prato Fino', '7896292300097'),
+  product('feijao-1kg', 'Feijão carioca 1 kg', 'Mercearia', 'pacote', 8.49, 24, 'Kicaldo', '7896110100014'),
+  product('acucar-1kg', 'Açúcar refinado 1 kg', 'Mercearia', 'pacote', 4.79, 15, 'União'),
+  product('cafe-500g', 'Café torrado e moído 500 g', 'Mercearia', 'pacote', 18.9, 12, 'Pilão'),
+  product('macarrao-500g', 'Macarrão espaguete 500 g', 'Mercearia', 'pacote', 5.29, 21, 'Renata'),
+  product('oleo-900ml', 'Óleo de soja 900 ml', 'Mercearia', 'garrafa', 7.99, 17, 'Liza'),
+  product('leite-1l', 'Leite integral 1 L', 'Laticínios', 'caixa', 5.89, 30, 'Italac'),
+  product('manteiga-200g', 'Manteiga com sal 200 g', 'Laticínios', 'pote', 12.49, 8, 'Aviação'),
+  product('queijo-500g', 'Queijo muçarela fatiado 500 g', 'Laticínios', 'bandeja', 24.9, 6),
+  product('iogurte-170g', 'Iogurte natural 170 g', 'Laticínios', 'unidade', 3.49, 14, 'Nestlé'),
+  product('banana-kg', 'Banana prata', 'Hortifruti', 'kg', 6.49, 20),
+  product('maca-kg', 'Maçã gala', 'Hortifruti', 'kg', 11.9, 16),
+  product('tomate-kg', 'Tomate italiano', 'Hortifruti', 'kg', 8.99, 13),
+  product('batata-kg', 'Batata inglesa', 'Hortifruti', 'kg', 7.49, 22),
+  product('alface-un', 'Alface crespa', 'Hortifruti', 'unidade', 3.99, 9),
+  product('laranja-kg', 'Laranja pera', 'Hortifruti', 'kg', 5.99, 0),
+  product('frango-kg', 'Peito de frango sem osso', 'Carnes', 'kg', 19.9, 11),
+  product('carne-kg', 'Patinho bovino', 'Carnes', 'kg', 42.9, 7),
+  product('ovos-12', 'Ovos brancos', 'Proteínas', 'dúzia', 11.99, 19),
+  product('detergente-500ml', 'Detergente neutro 500 ml', 'Limpeza', 'unidade', 2.79, 26, 'Ypê'),
+  product('sabao-po-800g', 'Lava-roupas em pó 800 g', 'Limpeza', 'caixa', 13.9, 10, 'Omo'),
+  product('papel-higienico-12', 'Papel higiênico folha dupla', 'Higiene', 'pacote com 12', 18.99, 14, 'Neve'),
+  product('sabonete-85g', 'Sabonete 85 g', 'Higiene', 'unidade', 2.49, 32, 'Dove'),
+  product('agua-15l', 'Água mineral 1,5 L', 'Bebidas', 'garrafa', 3.29, 28, 'Crystal'),
+  product('refrigerante-2l', 'Refrigerante cola 2 L', 'Bebidas', 'garrafa', 10.99, 12, 'Coca-Cola'),
+  product('pao-forma', 'Pão de forma tradicional 450 g', 'Padaria', 'pacote', 8.49, 9, 'Pullman'),
+  product('biscoito-350g', 'Biscoito cream cracker 350 g', 'Padaria', 'pacote', 5.99, 17, 'Bauducco'),
+  product('sorvete-15l', 'Sorvete de creme 1,5 L', 'Congelados', 'pote', 24.99, 5, 'Kibon'),
+];

@@ -1,11 +1,12 @@
+import { getLucaFailureFallback, type LucaFailureReason } from '../domain/aiFallback';
 import { FinanceContext } from './financeContext';
 
 const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 export const LUCA_MODELS = {
-  primary: 'gemini-2.5-flash',
-  fallback: 'gemini-2.5-flash-lite',
+  primary: 'gemini-3.5-flash',
+  fallback: 'gemini-3.0-flash-exp',
 };
 
 type LucaRole = 'user' | 'model';
@@ -256,6 +257,9 @@ ESCOPO — você só responde sobre:
 - Comparação de consumo, economia e dicas de compra.
 - Categorias de produtos e organização financeira básica do dia a dia.
 
+FUNÇÃO ESPECIAL:
+- Se o usuário pedir para "criar", "montar" ou "fazer" uma lista de compras, o sistema vai interceptar automaticamente o seu comando e criar a lista real no banco de dados. Portanto, você só precisa responder amigavelmente confirmando que a lista está sendo gerada e dando uma dica de economia ou finança rápida com base nos hábitos dele.
+
 FORA DO ESCOPO — se o usuário perguntar sobre qualquer outro assunto (investimentos, bolsa de valores, criptomoedas, política, receitas culinárias, esportes, previsão do tempo, piadas, filmes, séries ou qualquer tema não relacionado a compras e finanças domésticas), responda educadamente que você é especializado em compras e finanças do dia a dia e não pode ajudar com esse tópico. Sugira que o usuário use outro assistente para isso.
 
 REGRAS DE DADOS:
@@ -296,25 +300,12 @@ Priorize itens que o usuário já comprou antes, se houver histórico.
 Os preços estimados devem ser realistas para o mercado brasileiro atual.`;
 }
 
-function localLucaFallback(message: string, context?: FinanceContext | null): string {
-  const normalized = normalizeText(message);
-
-  if (context && (normalized.includes('gasto') || normalized.includes('analise') || normalized.includes('mês') || normalized.includes('mes'))) {
-    const categoryEntries = Object.entries(context.categoryTotals).sort((a, b) => b[1] - a[1]);
-    const [topCategory, topValue] = categoryEntries[0] || ['Outros', 0];
-
-    if (context.currentMonthTotal <= 0) {
-      return '**Análise do mês**\n\nAinda não tenho compras confirmadas neste mês. Adicione itens com preço na lista e marque como comprados para eu calcular total, categorias e tendência.';
-    }
-
-    return `**Análise do mês**\n\nVocê confirmou **${formatCurrency(context.currentMonthTotal)}** em compras neste mês.\n\n- Categoria principal: **${topCategory}** (${formatCurrency(topValue)})\n- Compras confirmadas: **${context.currentMonthItemCount}**\n- Estimativa mensal: **${context.estimatedMonthlySpend > 0 ? formatCurrency(context.estimatedMonthlySpend) : 'sem dados suficientes'}**\n\nAção prática: revise os itens de ${topCategory} e veja se algum pode ser comprado em maior quantidade, trocado por marca equivalente ou cortado na próxima lista.`;
-  }
-
-  if (!GEMINI_API_KEY) {
-    return 'A chave do Gemini ainda não está configurada no `.env`. Mesmo assim, posso fazer análises básicas quando houver itens com preço na sua lista.';
-  }
-
-  return 'Não consegui acessar a IA agora. Tente novamente em instantes; se quiser, peça "analise meus gastos do mês" que eu faço uma leitura básica com os dados salvos.';
+function classifyAiFailure(error: unknown): LucaFailureReason {
+  if (!GEMINI_API_KEY) return 'missing_configuration';
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  return message.includes('quota') || message.includes('429') || message.includes('resource-exhausted')
+    ? 'quota'
+    : 'network';
 }
 
 function localShoppingListFallback(context?: FinanceContext | null): GeneratedShoppingList {
@@ -545,7 +536,7 @@ export const getLucaResponse = async ({
       });
     } catch (fallbackError) {
       console.warn('Fallback do Gemini falhou:', fallbackError);
-      return localLucaFallback(message, context);
+      return getLucaFailureFallback(classifyAiFailure(fallbackError), message, context);
     }
   }
 };

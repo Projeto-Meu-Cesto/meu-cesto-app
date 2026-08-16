@@ -1,75 +1,89 @@
 # Meu Cesto
 
-**Meu Cesto** é um aplicativo mobile para gerenciamento de listas de compras e controle de gastos em tempo real. Este é um projeto acadêmico desenvolvido para o **5º período** da faculdade.
+MVP web demonstrável para mercados: catálogo, carrinho, retirada ou entrega, pagamento simulado, acompanhamento do pedido, finanças, pontos e assistente Luca em um único fluxo.
 
-## Autores
+O projeto está preparado para apresentar o produto antes da integração com o sistema real do mercado. Produtos, preços, estoque, pagamento, benefícios e progressão operacional são identificados como demonstração. Nenhuma cobrança real é feita.
 
-- **Guilherme Sant'Ana**
-- **Antonio Gomes**
+## O que já funciona
 
-## Sobre o projeto
+- Cadastro e login com Firebase Authentication.
+- Catálogo demonstrativo pesquisável, estoque e carrinho persistente por usuário.
+- Checkout de retirada ou entrega com cenários aprovado e recusado.
+- Histórico, detalhe e linha do tempo do pedido.
+- Progressão demonstrativa: confirmado, preparo, retirada/entrega, concluído e estornado.
+- Clube Meu Cesto com pontos pendentes, liberação na conclusão, reversão e troca de benefícios.
+- Compras concluídas refletidas nas finanças; estornos removem o valor e deixam lançamento de reversão.
+- Luca com Firebase AI Logic e fallback local transparente.
+- Navbar web responsiva com menu central de ações.
+- Inter para textos e Poppins ExtraBold para títulos de destaque, sem alteração da paleta original.
 
-O objetivo do Meu Cesto é oferecer uma experiência moderna e fluida para quem deseja organizar compras semanais, monitorar o orçamento mensal e buscar produtos por meio de integrações inteligentes.
+## Limites intencionais do MVP
 
-## Funcionalidades principais
+- O pagamento é um simulador determinístico; Stripe ou outro provedor entra somente após definição com o parceiro.
+- O catálogo atual é local e demonstrativo. A integração futura pode consumir ERP, PDV, API, arquivo ou dashboard do mercado.
+- Pontos e finanças são calculados no cliente para a apresentação. Antes de produção pública, confirmação de pagamento, estoque, pontos e transições devem ser validados em um backend confiável.
+- O projeto permanece no Firebase Spark. Não há Cloud Functions nem serviço pago obrigatório.
+- Android e iOS são destinos futuros; a entrega atual é web.
 
-- **Autenticação segura:** login e cadastro integrados ao Firebase Auth.
-- **Sincronização em tempo real:** listas de compras salvas no Cloud Firestore.
-- **Busca de produtos:** pesquisa de produtos por nome usando API externa.
-- **Seleção múltipla:** adição de vários itens à lista de uma só vez.
-- **Pull-to-refresh:** atualização de dados por gesto nativo.
-- **Sistema de notificações:** feedback visual com toasts.
-- **Dashboards de gastos:** acompanhamento de gastos mensais e por categoria.
-- **Assistente Luca:** tela de conversa com IA para dicas e insights.
+## Configuração
 
-## Tecnologias utilizadas
+Requisitos: Node.js compatível com Expo 54 e uma aplicação Web cadastrada no Firebase.
 
-- [Expo](https://expo.dev/)
-- [React Native](https://reactnative.dev/)
-- [Firebase](https://firebase.google.com/) Auth e Firestore
-- [Expo Router](https://docs.expo.dev/router/introduction/)
-- [React Native Reanimated](https://docs.swmansion.com/react-native-reanimated/)
-- [Ionicons](https://ionic.io/ionicons)
+```powershell
+npm install
+Copy-Item .env.example .env
+```
 
-## Como rodar o projeto
+Preencha no `.env` apenas os identificadores públicos da aplicação Firebase. Para o Luca online:
 
-1. Instale as dependências:
+1. No console Firebase, abra Firebase AI Logic e selecione Gemini Developer API no nível gratuito.
+2. Cadastre a aplicação Web no App Check com reCAPTCHA Enterprise.
+3. Informe `EXPO_PUBLIC_FIREBASE_APPCHECK_SITE_KEY`.
+4. Em desenvolvimento, defina `EXPO_PUBLIC_FIREBASE_APPCHECK_DEBUG=true`, copie o token exibido pelo SDK e registre-o no console. Nunca use o modo debug em produção.
 
-   ```bash
-   npm install
-   ```
+Sem App Check/AI configurado, todo o restante continua utilizável e o Luca responde com o fallback local sem inventar números.
 
-2. Crie o arquivo de variáveis de ambiente:
+## Executar na web
 
-   ```bash
-   cp .env.example .env
-   ```
+```powershell
+npm run web
+```
 
-3. Preencha o `.env` com as credenciais do Firebase e das APIs usadas pelo projeto.
+Para gerar a versão estática:
 
-4. Inicie o servidor de desenvolvimento:
-
-   ```bash
-   npx expo start
-   ```
-
-5. Abra o app:
-
-   - Pelo app **Expo Go** no celular.
-   - Pelo navegador usando a opção web do Expo.
-   - Por emulador Android/iOS.
-
-## Verificações
-
-Comandos usados para conferir a qualidade do projeto:
-
-```bash
-npm run lint
-npx tsc --noEmit
+```powershell
 npx expo export --platform web
 ```
 
-## Observação sobre ambiente
+O resultado fica em `dist/`.
 
-O app não inclui credenciais reais no repositório. Caso as variáveis do Firebase não estejam configuradas, a interface continua carregando, mas login, cadastro e dados em tempo real dependem do `.env` preenchido corretamente.
-# Lead-The-Dragon-Fanpage
+## Firebase e regras
+
+As regras mantêm dados em `users/{uid}` isolados por proprietário, validam pedidos, pontos e lançamentos financeiros, exigem autenticação para ler o cache de produtos e negam escrita de catálogo pelo cliente.
+
+```powershell
+npm run firebase:login
+npm run firebase:deploy
+```
+
+O teste automatizado das regras usa o Firestore Emulator e exige Java instalado:
+
+```powershell
+npm run test:rules
+```
+
+## Qualidade
+
+```powershell
+npm test
+npx tsc --noEmit
+npm run lint
+npx expo export --platform web
+```
+
+O roteiro completo de apresentação está em [docs/testing/mvp-demo-script.md](docs/testing/mvp-demo-script.md).
+
+## Autores
+
+- Guilherme Sant'Ana
+- Antonio Gomes

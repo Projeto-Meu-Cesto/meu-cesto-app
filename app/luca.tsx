@@ -10,28 +10,35 @@ import {
   Dimensions,
   Easing,
   FlatList,
-  Image,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
   RefreshControl,
-  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  TouchableWithoutFeedback,
+  Pressable,
   View,
+  ScrollView,
 } from 'react-native';
-import { getLucaResponse, LUCA_MODELS, LucaHistoryItem } from '../scripts/aiService';
+import * as Haptics from 'expo-haptics';
+
+import { getLucaResponse, LUCA_MODELS, LucaHistoryItem, isShoppingListRequest, generateShoppingList } from '../scripts/aiService';
 import { FinanceContext, getUserFinanceContext, shouldAttachFinanceChart } from '../scripts/financeContext';
 import { auth, db } from '../scripts/firebaseConfig';
+import { Colors, Spacing, Radius, STATUS_BAR_HEIGHT } from '../constants/theme';
 
-const PRIMARY_GREEN = '#00A36C';
-const TEXT_DARK = '#1E293B';
-const TEXT_GRAY = '#64748B';
-const BG_LIGHT = '#F8FAFC';
+// UI components
+import { Typography } from '../components/ui/Typography';
+import { Card } from '../components/ui/Card';
+import { Button } from '../components/ui/Button';
+import { ProgressBar } from '../components/ui/ProgressBar';
+import { AppModal } from '../components/ui/AppModal';
+import AnimatedReanimated, { FadeIn, FadeOut, SlideInRight, SlideOutRight } from 'react-native-reanimated';
+import { Sidebar } from '../components/ui/Sidebar';
+
 const DEFAULT_CHAT_ID = 'principal';
 const HISTORY_TIMEOUT_MS = 4500;
 const FINANCE_CONTEXT_TIMEOUT_MS = 3500;
@@ -61,7 +68,6 @@ const QUICK_ACTIONS = [
   { id: '1', label: 'Como economizar no mercado?', icon: 'leaf-outline' },
   { id: '2', label: 'Analise meus gastos do mês', icon: 'stats-chart-outline' },
   { id: '3', label: 'Dicas de lista de compras', icon: 'list-outline' },
-  { id: '4', label: 'Quais categorias pesaram mais?', icon: 'pie-chart-outline' },
 ];
 
 function formatCurrency(value: number): string {
@@ -76,9 +82,9 @@ function buildChart(context: FinanceContext): MessageChart {
     title: 'Gastos por categoria',
     total: context.currentMonthTotal,
     bars: [
-      { label: 'Alimentação', value: context.categoryTotals.Alimentação, color: PRIMARY_GREEN },
-      { label: 'Transporte', value: context.categoryTotals.Transporte, color: '#38BDF8' },
-      { label: 'Outros', value: context.categoryTotals.Outros, color: '#F59E0B' },
+      { label: 'Alimentação', value: context.categoryTotals.Alimentação || 0, color: Colors.primary },
+      { label: 'Transporte', value: context.categoryTotals.Transporte || 0, color: '#38BDF8' },
+      { label: 'Outros', value: context.categoryTotals.Outros || 0, color: Colors.textMuted },
     ],
   };
 }
@@ -96,7 +102,6 @@ function toGeminiHistory(messages: Message[]): LucaHistoryItem[] {
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('TIMEOUT')), timeoutMs);
-
     promise
       .then((value) => resolve(value))
       .catch((error) => reject(error))
@@ -144,18 +149,16 @@ function TypingDots() {
 
 function InlineMarkdown({ text, isUser = false }: { text: string; isUser?: boolean }) {
   const parts = text.split(/(\*\*[^*]+\*\*)/g);
-
   return (
-    <Text style={[styles.markdownText, isUser && styles.markdownTextUser]}>
+    <Text style={[styles.markdownText, isUser ? styles.markdownTextUser : { color: Colors.textPrimary }]}>
       {parts.map((part, index) => {
         if (part.startsWith('**') && part.endsWith('**')) {
           return (
-            <Text key={`${part}-${index}`} style={styles.markdownBold}>
+            <Text key={`${part}-${index}`} style={[styles.markdownBold, { color: isUser ? '#080A09' : Colors.primary }]}>
               {part.slice(2, -2)}
             </Text>
           );
         }
-
         return <Text key={`${part}-${index}`}>{part}</Text>;
       })}
     </Text>
@@ -164,50 +167,26 @@ function InlineMarkdown({ text, isUser = false }: { text: string; isUser?: boole
 
 function MarkdownMessage({ text, isUser = false }: { text: string; isUser?: boolean }) {
   const lines = text.split('\n');
-
   return (
     <View style={styles.markdownBlock}>
       {lines.map((line, index) => {
         const trimmed = line.trim();
+        if (!trimmed) return <View key={`space-${index}`} style={styles.markdownSpacer} />;
 
-        if (!trimmed) {
-          return <View key={`space-${index}`} style={styles.markdownSpacer} />;
-        }
-
-        if (trimmed.startsWith('### ')) {
+        if (trimmed.startsWith('### ') || trimmed.startsWith('## ')) {
           return (
-            <Text key={`h3-${index}`} style={[styles.markdownHeading, isUser && styles.markdownTextUser]}>
-              {trimmed.replace(/^###\s+/, '')}
-            </Text>
-          );
-        }
-
-        if (trimmed.startsWith('## ')) {
-          return (
-            <Text key={`h2-${index}`} style={[styles.markdownHeading, isUser && styles.markdownTextUser]}>
-              {trimmed.replace(/^##\s+/, '')}
-            </Text>
+            <Typography key={`h3-${index}`} variant="body" weight="bold" color={isUser ? '#080A09' : Colors.primary} style={{ marginTop: Spacing.sm, marginBottom: 2 }}>
+              {trimmed.replace(/^###\s+|^##\s+/, '')}
+            </Typography>
           );
         }
 
         if (/^[-*]\s+/.test(trimmed)) {
           return (
             <View key={`bullet-${index}`} style={styles.bulletRow}>
-              <Text style={[styles.bulletDot, isUser && styles.markdownTextUser]}>•</Text>
+              <Typography variant="body" color={isUser ? '#080A09' : Colors.primary}>•</Typography>
               <View style={styles.bulletText}>
                 <InlineMarkdown text={trimmed.replace(/^[-*]\s+/, '')} isUser={isUser} />
-              </View>
-            </View>
-          );
-        }
-
-        if (/^\d+\.\s+/.test(trimmed)) {
-          const marker = trimmed.match(/^\d+\./)?.[0] || '';
-          return (
-            <View key={`number-${index}`} style={styles.bulletRow}>
-              <Text style={[styles.numberMarker, isUser && styles.markdownTextUser]}>{marker}</Text>
-              <View style={styles.bulletText}>
-                <InlineMarkdown text={trimmed.replace(/^\d+\.\s+/, '')} isUser={isUser} />
               </View>
             </View>
           );
@@ -223,96 +202,22 @@ function FinanceMiniChart({ chart }: { chart: MessageChart }) {
   const maxValue = Math.max(...chart.bars.map((bar) => bar.value), 1);
 
   return (
-    <View style={styles.chartCard}>
+    <Card elevated style={styles.chartCard}>
       <View style={styles.chartHeader}>
-        <Text style={styles.chartTitle}>{chart.title}</Text>
-        <Text style={styles.chartTotal}>{formatCurrency(chart.total)}</Text>
+        <Typography variant="body" weight="bold" color={Colors.textPrimary}>{chart.title}</Typography>
+        <Typography variant="body" weight="heavy" color={Colors.primary}>{formatCurrency(chart.total)}</Typography>
       </View>
 
       {chart.bars.map((bar) => (
         <View key={bar.label} style={styles.chartRow}>
           <View style={styles.chartLabelRow}>
-            <Text style={styles.chartLabel}>{bar.label}</Text>
-            <Text style={styles.chartValue}>{formatCurrency(bar.value)}</Text>
+            <Typography variant="caption" color={Colors.textSecondary}>{bar.label}</Typography>
+            <Typography variant="caption" weight="bold" color={Colors.textPrimary}>{formatCurrency(bar.value)}</Typography>
           </View>
-          <View style={styles.chartTrack}>
-            <View
-              style={[
-                styles.chartFill,
-                {
-                  width: `${Math.max(4, (bar.value / maxValue) * 100)}%` as any,
-                  backgroundColor: bar.color,
-                },
-              ]}
-            />
-          </View>
+          <ProgressBar progress={bar.value / maxValue} color={bar.color} height={6} />
         </View>
       ))}
-    </View>
-  );
-}
-
-const MAX_CHATS_LIMIT = 8;
-const MAX_MESSAGES_LIMIT = 20;
-
-function SkeletonItem({ width, height, style }: { width: any; height: number; style?: any }) {
-  const opacity = useRef(new Animated.Value(0.3)).current;
-
-  React.useEffect(() => {
-    const anim = Animated.loop(
-      Animated.sequence([
-        Animated.timing(opacity, {
-          toValue: 0.7,
-          duration: 800,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacity, {
-          toValue: 0.3,
-          duration: 800,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    anim.start();
-    return () => anim.stop();
-  }, [opacity]);
-
-  return (
-    <Animated.View
-      style={[
-        {
-          width,
-          height,
-          backgroundColor: '#E2E8F0',
-          borderRadius: 12,
-          opacity,
-        },
-        style,
-      ]}
-    />
-  );
-}
-
-function ChatSkeleton() {
-  return (
-    <View style={{ flex: 1, padding: 20, gap: 16 }}>
-      <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 8, maxWidth: '80%' }}>
-        <View style={[styles.avatarMini, { backgroundColor: '#E2E8F0' }]} />
-        <SkeletonItem width="60%" height={40} style={{ borderBottomLeftRadius: 4 }} />
-      </View>
-      <View style={{ flexDirection: 'row-reverse', alignItems: 'flex-end', gap: 8, maxWidth: '80%', alignSelf: 'flex-end' }}>
-        <SkeletonItem width="70%" height={60} style={{ borderBottomRightRadius: 4, backgroundColor: '#D1FAE5' }} />
-      </View>
-      <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 8, maxWidth: '80%' }}>
-        <View style={[styles.avatarMini, { backgroundColor: '#E2E8F0' }]} />
-        <SkeletonItem width="80%" height={85} style={{ borderBottomLeftRadius: 4 }} />
-      </View>
-      <View style={{ flexDirection: 'row-reverse', alignItems: 'flex-end', gap: 8, maxWidth: '80%', alignSelf: 'flex-end' }}>
-        <SkeletonItem width="50%" height={45} style={{ borderBottomRightRadius: 4, backgroundColor: '#D1FAE5' }} />
-      </View>
-    </View>
+    </Card>
   );
 }
 
@@ -321,32 +226,14 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
   const [user, setUser] = useState<User | null>(auth.currentUser);
   const [authReady, setAuthReady] = useState(Boolean(auth.currentUser));
   const userUid = user?.uid;
-  const userName = user?.displayName?.split(' ')[0] || 'amigo';
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [sidebarVisible, setSidebarVisible] = useState(false);
   const [chats, setChats] = useState<any[]>([]);
   const [chatsLoading, setChatsLoading] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const drawerAnimation = useRef(new Animated.Value(-Dimensions.get('window').width * 0.78)).current;
-  const backdropOpacity = useRef(new Animated.Value(0)).current;
-
-  const [keyboardVisible, setKeyboardVisible] = useState(false);
-
-  React.useEffect(() => {
-    const showSubscription = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      () => setKeyboardVisible(true)
-    );
-    const hideSubscription = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      () => setKeyboardVisible(false)
-    );
-
-    return () => {
-      showSubscription.remove();
-      hideSubscription.remove();
-    };
-  }, []);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deletingChat, setDeletingChat] = useState(false);
 
   const messagesPath = React.useMemo(
     () => userUid && activeChatId
@@ -357,6 +244,7 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
+  const hasMessages = messages.length > 0;
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyWarning, setHistoryWarning] = useState(false);
@@ -366,25 +254,19 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
   const [currentlyTypingId, setCurrentlyTypingId] = useState<string | null>(null);
   const [typingText, setTypingText] = useState('');
   const typingIntervalRef = useRef<any>(null);
-
   const flatListRef = useRef<FlatList<Message>>(null);
-  const hasMessages = messages.length > 0;
 
   // Listen to auth changes
   React.useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
       setAuthReady(true);
-
-      if (!nextUser) {
-        router.replace('/');
-      }
+      if (!nextUser) router.replace('/');
     });
-
     return unsubscribe;
   }, [router]);
 
-  // Listen to chats list in real-time
+  // Sync chats
   React.useEffect(() => {
     if (!authReady || !user) {
       setChatsLoading(false);
@@ -433,10 +315,9 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
     }
   };
 
-  // Load message history when activeChatId or messagesPath changes
+  // Load message history
   React.useEffect(() => {
     if (!authReady) return;
-
     if (!user || !messagesPath) {
       setHistoryLoading(false);
       return;
@@ -449,65 +330,35 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
         setHistoryWarning(false);
         const historyQuery = query(messagesPath, orderBy('createdAt', 'desc'), limit(30));
         const snapshot = await withTimeout(getDocs(historyQuery), HISTORY_TIMEOUT_MS);
-        const loaded = snapshot.docs
-          .map((messageDoc) => ({
-            id: messageDoc.id,
-            ...messageDoc.data(),
-          })) as Message[];
+        const loaded = snapshot.docs.map((messageDoc) => ({
+          id: messageDoc.id,
+          ...messageDoc.data(),
+        })) as Message[];
 
         if (!active) return;
-
         setMessages(loaded.reverse());
       } catch (error) {
         console.error('[Luca] Erro ao carregar histórico:', error);
-        if (active) {
-          setHistoryWarning(true);
-        }
+        if (active) setHistoryWarning(true);
       } finally {
-        if (active) {
-          setHistoryLoading(false);
-        }
+        if (active) setHistoryLoading(false);
       }
     };
 
     loadHistory();
-
     return () => {
       active = false;
     };
   }, [authReady, messagesPath, user]);
 
-  React.useEffect(() => {
-    if (historyLoading) {
-      const timer = setTimeout(() => {
-        setHistoryLoading(false);
-        setHistoryWarning(true);
-      }, HISTORY_TIMEOUT_MS + 700);
-
-      return () => clearTimeout(timer);
-    }
-  }, [historyLoading]);
-
-  // Clean up typing animation interval
-  React.useEffect(() => {
-    return () => {
-      if (typingIntervalRef.current) {
-        clearInterval(typingIntervalRef.current);
-      }
-    };
-  }, []);
-
   const simulateTyping = useCallback((fullText: string, lucaMsgId: string, onComplete: () => void) => {
     setCurrentlyTypingId(lucaMsgId);
     setTypingText('');
-
     const words = fullText.split(' ');
     let currentWordIndex = 0;
     let currentText = '';
 
-    if (typingIntervalRef.current) {
-      clearInterval(typingIntervalRef.current);
-    }
+    if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
 
     typingIntervalRef.current = setInterval(() => {
       if (currentWordIndex < words.length) {
@@ -526,7 +377,6 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
   const saveMessage = useCallback(async (message: Omit<Message, 'id'>) => {
     if (!user || !activeChatId || !messagesPath) return;
-
     const isFirstUserMessage = message.sender === 'user' && messages.length === 0;
 
     await setDoc(
@@ -546,34 +396,13 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
     });
   }, [messagesPath, activeChatId, user, messages.length, chats]);
 
-  const copyMessage = useCallback(async (text: string) => {
-    try {
-      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
-        await navigator.clipboard.writeText(text);
-        Alert.alert('Copiado', 'Resposta copiada para a área de transferência.');
-        return;
-      }
-
-      Alert.alert('Copiar resposta', text);
-    } catch {
-      Alert.alert('Copiar resposta', text);
-    }
-  }, []);
-
   const sendMessage = useCallback(async (textToSend: string) => {
     const cleanText = textToSend.trim();
     if (!cleanText || loading || !user || !activeChatId) return;
 
-    if (messages.length >= MAX_MESSAGES_LIMIT) {
-      Alert.alert(
-        'Limite de Conversa Atingido',
-        'Esta conversa atingiu o limite de 20 mensagens. Crie uma nova conversa para continuar.'
-      );
-      return;
-    }
-
     setInput('');
     setLoading(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
     const userMsg: Message = {
       id: `local-user-${Date.now()}`,
@@ -583,32 +412,64 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
     };
 
     setMessages((prev) => [...prev, userMsg]);
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 80);
 
     try {
-      saveMessage({
-        text: cleanText,
-        sender: 'user',
-      }).catch((error) => console.warn('[Luca] Mensagem do usuário não foi salva ainda:', error));
-
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 80);
+      saveMessage({ text: cleanText, sender: 'user' }).catch(err => console.warn(err));
 
       let financeContext: FinanceContext | null = null;
-
       try {
         financeContext = await withTimeout(getUserFinanceContext(user.uid), FINANCE_CONTEXT_TIMEOUT_MS);
       } catch (contextError) {
-        console.warn('[Luca] Contexto financeiro lento. Respondendo sem bloquear:', contextError);
+        console.warn('[Luca] Contexto financeiro lento:', contextError);
       }
 
-      const responseText = await getLucaResponse({
-        history: toGeminiHistory([...messages, userMsg]),
-        message: cleanText,
-        context: financeContext,
-        model: LUCA_MODELS.primary,
-      });
+      let responseText = '';
+
+      if (isShoppingListRequest(cleanText)) {
+        try {
+          const generatedList = await generateShoppingList(financeContext, cleanText);
+          
+          if (generatedList && generatedList.items.length > 0) {
+            for (const item of generatedList.items) {
+               await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
+                 name: item.name,
+                 category: item.category,
+                 quantity: '1 un',
+                 checked: false,
+                 createdAt: serverTimestamp(),
+               });
+            }
+            
+            const itemList = generatedList.items.map(i => `- **${i.name}**`).join('\n');
+            responseText = `Pronto! Criei a sua lista. 🛒\n\nAdicionei os seguintes itens:\n${itemList}\n\nEles já estão salvos na aba Lista!`;
+          } else {
+            responseText = await getLucaResponse({
+              history: toGeminiHistory([...messages, userMsg]),
+              message: cleanText,
+              context: financeContext,
+              model: LUCA_MODELS.primary,
+            });
+          }
+        } catch (e) {
+          console.error('[Luca] Erro ao criar lista via IA', e);
+          responseText = await getLucaResponse({
+            history: toGeminiHistory([...messages, userMsg]),
+            message: cleanText,
+            context: financeContext,
+            model: LUCA_MODELS.primary,
+          });
+        }
+      } else {
+        responseText = await getLucaResponse({
+          history: toGeminiHistory([...messages, userMsg]),
+          message: cleanText,
+          context: financeContext,
+          model: LUCA_MODELS.primary,
+        });
+      }
 
       const lucaMsgId = `local-luca-${Date.now()}`;
-
       const lucaMsg: Message = {
         id: lucaMsgId,
         text: '',
@@ -626,35 +487,26 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
             msg.id === lucaMsgId ? { ...msg, text: responseText } : msg
           )
         );
-
         saveMessage({
           text: responseText,
           sender: 'luca',
           model: lucaMsg.model,
           chart: lucaMsg.chart,
-        }).catch((error) => console.warn('[Luca] Resposta do Luca não foi salva ainda:', error));
+        }).catch(err => console.warn(err));
       });
 
     } catch (err) {
       console.error('[Luca] Erro:', err);
       const errorMsg: Message = {
         id: `local-error-${Date.now()}`,
-        text: 'Desculpe, tive um problema para responder agora. Pode tentar novamente?',
+        text: 'Tive um problema para responder agora. Pode tentar novamente?',
         sender: 'luca',
         model: 'local-fallback',
         createdAt: new Date().toISOString(),
       };
-
       setMessages((prev) => [...prev, errorMsg]);
-
-      saveMessage({
-        text: errorMsg.text,
-        sender: errorMsg.sender,
-        model: errorMsg.model,
-      }).catch((error) => console.warn('[Luca] Erro local não foi salvo ainda:', error));
     } finally {
       setLoading(false);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 120);
     }
   }, [loading, messages, saveMessage, user, activeChatId, simulateTyping]);
 
@@ -670,7 +522,7 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
       })) as Message[];
       setMessages(loaded.reverse());
     } catch (error) {
-      console.error('[Luca] Erro ao atualizar mensagens:', error);
+      console.error(error);
     } finally {
       setIsRefreshing(false);
     }
@@ -678,18 +530,11 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
   const handleCreateNewChat = async () => {
     if (!user) return;
-    if (chats.length >= MAX_CHATS_LIMIT) {
-      Alert.alert(
-        'Limite de Chats Atingido',
-        `Você atingiu o limite máximo de ${MAX_CHATS_LIMIT} chats ativos. Por favor, exclua uma conversa antiga antes de criar uma nova.`
-      );
-      return;
-    }
-
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     try {
       setLoading(true);
       const newDoc = await addDoc(collection(db, 'users', user.uid, 'luca_chats'), {
-        title: `Nova conversa ${chats.length + 1}`,
+        title: `Conversa ${chats.length + 1}`,
         updatedAt: serverTimestamp(),
       });
       setActiveChatId(newDoc.id);
@@ -697,7 +542,6 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
       toggleDrawer(false);
     } catch (e) {
       Alert.alert('Erro', 'Não foi possível criar uma nova conversa.');
-      console.error(e);
     } finally {
       setLoading(false);
     }
@@ -705,876 +549,513 @@ export default function LucaScreen({ inTabs = false }: { inTabs?: boolean }) {
 
   const handleDeleteChat = (chatId: string, chatTitle: string) => {
     if (!user) return;
-    Alert.alert(
-      'Excluir Conversa',
-      `Tem certeza que deseja excluir permanentemente a conversa "${chatTitle}"?`,
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Excluir',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteDoc(doc(db, 'users', user.uid, 'luca_chats', chatId));
-              if (activeChatId === chatId) {
-                setActiveChatId(null);
-                setMessages([]);
-              }
-            } catch (error) {
-              console.error('[Luca] Erro ao excluir chat:', error);
-              Alert.alert('Erro', 'Não foi possível excluir a conversa.');
-            }
-          },
-        },
-      ]
-    );
+    setDeleteTarget({ id: chatId, title: chatTitle });
+  };
+
+  const confirmDeleteChat = async () => {
+    if (!user || !deleteTarget) return;
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    setDeletingChat(true);
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'luca_chats', deleteTarget.id));
+      if (activeChatId === deleteTarget.id) {
+        setActiveChatId(null);
+        setMessages([]);
+      }
+      setDeleteTarget(null);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setDeletingChat(false);
+    }
   };
 
   const toggleDrawer = (open: boolean) => {
-    if (open) {
-      setDrawerOpen(true);
-      setTimeout(() => {
-        Animated.parallel([
-          Animated.timing(drawerAnimation, {
-            toValue: 0,
-            duration: 250,
-            useNativeDriver: true,
-          }),
-          Animated.timing(backdropOpacity, {
-            toValue: 1,
-            duration: 250,
-            useNativeDriver: true,
-          })
-        ]).start();
-      }, 10);
-    } else {
-      Animated.parallel([
-        Animated.timing(drawerAnimation, {
-          toValue: -Dimensions.get('window').width * 0.78,
-          duration: 200,
-          useNativeDriver: true,
-        }),
-        Animated.timing(backdropOpacity, {
-          toValue: 0,
-          duration: 200,
-          useNativeDriver: true,
-        })
-      ]).start(() => {
-        setDrawerOpen(false);
-      });
-    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setDrawerOpen(open);
   };
 
-  const handleInputKeyPress = useCallback((event: any) => {
-    if (Platform.OS !== 'web') return;
-
-    const nativeEvent = event?.nativeEvent;
-    const key = nativeEvent?.key;
-    const shiftKey = Boolean(nativeEvent?.shiftKey);
-
-    if (key === 'Enter' && !shiftKey) {
-      event.preventDefault?.();
-      nativeEvent.preventDefault?.();
-      sendMessage(input);
-    }
-  }, [input, sendMessage]);
-
-  const renderMessage = useCallback(({ item }: { item: Message }) => {
-    const isUser = item.sender === 'user';
-    const textToShow = item.id === currentlyTypingId ? (typingText || '') + ' ▊' : item.text;
-
-    return (
-      <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowLuca]}>
-        {!isUser && (
-          <View style={styles.avatarMini}>
-            <Ionicons name="sparkles" size={13} color={PRIMARY_GREEN} />
-          </View>
-        )}
-
-        <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleLuca]}>
-          <MarkdownMessage text={textToShow} isUser={isUser} />
-          {!isUser && item.chart ? <FinanceMiniChart chart={item.chart} /> : null}
-          {!isUser && (
-            <TouchableOpacity style={styles.copyButton} onPress={() => copyMessage(item.text)}>
-              <Ionicons name="copy-outline" size={14} color={TEXT_GRAY} />
-              <Text style={styles.copyText}>Copiar</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      </View>
-    );
-  }, [copyMessage, currentlyTypingId, typingText]);
-
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
-    >
-      <StatusBar barStyle="dark-content" backgroundColor="#fff" translucent />
+    <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
 
+      {/* Header */}
       <View style={styles.header}>
         {inTabs ? (
-          <TouchableOpacity onPress={() => toggleDrawer(true)} style={styles.headerBtn}>
-            <Ionicons name="menu-outline" size={24} color={TEXT_DARK} />
+          <TouchableOpacity style={styles.headerBtn} onPress={() => setSidebarVisible(true)}>
+            <Ionicons name="menu-outline" size={24} color={Colors.textPrimary} />
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity onPress={() => router.back()} style={styles.headerBtn}>
-            <Ionicons name="chevron-back" size={24} color={TEXT_DARK} />
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()}>
+            <Ionicons name="arrow-back-outline" size={24} color={Colors.textPrimary} />
           </TouchableOpacity>
         )}
+        <View style={styles.headerTitleContainer}>
+          <Ionicons name="sparkles" size={16} color={Colors.primary} />
+          <Typography variant="title" weight="bold" color={Colors.textPrimary}>
+            Luca
+          </Typography>
+        </View>
+        <TouchableOpacity style={styles.headerBtn} onPress={() => toggleDrawer(true)}>
+          <Ionicons name="chatbubbles-outline" size={22} color={Colors.textPrimary} />
+        </TouchableOpacity>
       </View>
 
-      {historyLoading ? (
-        <ChatSkeleton />
-      ) : !hasMessages ? (
-        <ScrollView
-          contentContainerStyle={[styles.emptyStateScroll, inTabs && { paddingBottom: keyboardVisible ? 20 : 100 }]}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={isRefreshing}
-              onRefresh={handleRefresh}
-              colors={[PRIMARY_GREEN]}
-              tintColor={PRIMARY_GREEN}
-              progressViewOffset={30}
-            />
-          }
-        >
-          <View style={styles.emptyStateInner}>
-            <Image
-              source={require('../assets/images/Meu-Cesto-Logo.png')}
-              style={styles.logo}
-              resizeMode="contain"
-            />
-            <Text style={styles.greetingTitle}>Olá, {userName}</Text>
-            <Text style={styles.greetingSubtitle}>Posso analisar seus gastos reais e ajudar sua lista ficar mais econômica.</Text>
-
-            {historyWarning ? (
-              <View style={styles.historyNotice}>
-                <Ionicons name="cloud-offline-outline" size={16} color={TEXT_GRAY} />
-                <Text style={styles.historyNoticeText}>Histórico lento. Você já pode conversar.</Text>
-              </View>
-            ) : null}
-
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.quickScroll}
-              style={styles.quickScrollContainer}
-            >
-              {QUICK_ACTIONS.map((action) => (
-                <TouchableOpacity
-                  key={action.id}
-                  style={styles.chip}
-                  onPress={() => sendMessage(action.label)}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons name={action.icon as any} size={16} color={PRIMARY_GREEN} />
-                  <Text style={styles.chipText}>{action.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-        </ScrollView>
-      ) : (
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+      >
         <FlatList
           ref={flatListRef}
           data={messages}
           keyExtractor={(item) => item.id}
-          renderItem={renderMessage}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
-          onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+          contentContainerStyle={[styles.chatScroll, !hasMessages && { flex: 1, justifyContent: 'center' }]}
           refreshControl={
             <RefreshControl
               refreshing={isRefreshing}
               onRefresh={handleRefresh}
-              colors={[PRIMARY_GREEN]}
-              tintColor={PRIMARY_GREEN}
+              tintColor={Colors.primary}
+              colors={[Colors.primary]}
             />
           }
-          ListFooterComponent={
-            loading ? (
-              <View style={[styles.messageRow, styles.messageRowLuca]}>
-                <View style={styles.avatarMini}>
-                  <Ionicons name="sparkles" size={13} color={PRIMARY_GREEN} />
-                </View>
-                <View style={[styles.bubble, styles.bubbleLuca]}>
-                  <TypingDots />
-                  <Text style={styles.thinkingText}>Luca analisando seus dados...</Text>
+          ListEmptyComponent={
+            <View style={styles.emptyWrap}>
+              <View style={styles.lucaAvatarBig}>
+                <Ionicons name="sparkles" size={32} color="#080A09" />
+              </View>
+              <Typography variant="heading" weight="bold" color={Colors.textPrimary}>
+                Olá, sou o Luca
+              </Typography>
+              <Typography variant="body" color={Colors.textSecondary} align="center" style={styles.emptySubtitle}>
+                Seu copiloto de compras inteligentes e finanças domésticas. Como posso te ajudar hoje?
+              </Typography>
+
+              <View style={styles.quickActionsWrap}>
+                {QUICK_ACTIONS.map((action) => (
+                  <TouchableOpacity
+                    key={action.id}
+                    style={styles.quickActionBtn}
+                    onPress={() => sendMessage(action.label)}
+                  >
+                    <Ionicons name={action.icon as any} size={16} color={Colors.primary} />
+                    <Typography variant="caption" weight="semibold" color={Colors.textPrimary}>
+                      {action.label}
+                    </Typography>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          }
+          renderItem={({ item }) => {
+            const isUser = item.sender === 'user';
+            const isTyping = item.id === currentlyTypingId;
+            const msgText = isTyping ? typingText : item.text;
+
+            return (
+              <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowLuca]}>
+                {!isUser && (
+                  <View style={styles.avatarMini}>
+                    <Ionicons name="sparkles" size={14} color="#080A09" />
+                  </View>
+                )}
+                <View style={{ maxWidth: '80%', gap: Spacing.sm }}>
+                  <View style={[
+                    styles.messageBubble,
+                    isUser ? styles.bubbleUser : styles.bubbleLuca
+                  ]}>
+                    {isTyping && msgText.length === 0 ? (
+                      <TypingDots />
+                    ) : (
+                      <MarkdownMessage text={msgText} isUser={isUser} />
+                    )}
+                  </View>
+                  {item.chart && <FinanceMiniChart chart={item.chart} />}
                 </View>
               </View>
-            ) : null
-          }
+            );
+          }}
         />
-      )}
 
-      <View style={[styles.inputArea, (inTabs && !keyboardVisible) && styles.inputAreaWithTabs]}>
-        {/* Messages Limit Badge */}
-        {messages.length >= 16 && (
-          <View style={[
-            styles.limitBadge,
-            messages.length >= MAX_MESSAGES_LIMIT ? styles.limitBadgeBlocked : styles.limitBadgeWarning
-          ]}>
-            <Ionicons
-              name={messages.length >= MAX_MESSAGES_LIMIT ? 'lock-closed-outline' : 'warning-outline'}
-              size={12}
-              color={messages.length >= MAX_MESSAGES_LIMIT ? '#EF4444' : '#D97706'}
-            />
-            <Text style={[
-              styles.limitBadgeText,
-              messages.length >= MAX_MESSAGES_LIMIT ? styles.limitBadgeTextBlocked : styles.limitBadgeTextWarning
-            ]}>
-              {messages.length >= MAX_MESSAGES_LIMIT
-                ? 'Limite de 20 mensagens atingido. Comece outro chat!'
-                : `Atenção: resta(m) ${MAX_MESSAGES_LIMIT - messages.length} mensagem(ns) nesta conversa.`
-              }
-            </Text>
-          </View>
-        )}
-
-        <View style={styles.inputBox}>
+        {/* Input Bar */}
+        <View style={[styles.inputBar, { paddingBottom: Platform.OS === 'ios' ? 24 : Spacing.md }]}>
           <TextInput
             style={styles.textInput}
-            placeholder={
-              !user
-                ? 'Faça login para conversar'
-                : messages.length >= MAX_MESSAGES_LIMIT
-                  ? 'Limite atingido nesta conversa'
-                  : 'Mensagem...'
-            }
-            placeholderTextColor="#94A3B8"
             value={input}
             onChangeText={setInput}
+            placeholder="Pergunte sobre seus gastos ou listas..."
+            placeholderTextColor={Colors.textMuted}
             multiline
-            maxLength={1000}
-            editable={Boolean(user) && !loading && messages.length < MAX_MESSAGES_LIMIT}
-            onSubmitEditing={() => sendMessage(input)}
-            onKeyPress={handleInputKeyPress}
-            returnKeyType="send"
+            maxLength={300}
           />
           <TouchableOpacity
-            style={[
-              styles.sendBtn,
-              (!input.trim() || loading || !user || messages.length >= MAX_MESSAGES_LIMIT) && styles.sendBtnDisabled
-            ]}
+            style={[styles.sendBtn, !input.trim() && styles.sendBtnDisabled]}
+            disabled={!input.trim() || loading}
             onPress={() => sendMessage(input)}
-            disabled={!input.trim() || loading || !user || messages.length >= MAX_MESSAGES_LIMIT}
-            activeOpacity={0.8}
           >
-            {loading
-              ? <ActivityIndicator size="small" color="#fff" />
-              : <Ionicons name="arrow-up" size={20} color="#fff" />
-            }
+            {loading ? (
+              <ActivityIndicator size="small" color="#080A09" />
+            ) : (
+              <Ionicons name="send" size={16} color="#080A09" />
+            )}
           </TouchableOpacity>
         </View>
-        <Text style={styles.disclaimer}>Luca usa seus dados salvos no app e pode cometer erros.</Text>
-      </View>
+      </KeyboardAvoidingView>
 
-      {/* Side Menu Drawer */}
+      {/* Drawer Menu Sidepanel */}
       {drawerOpen && (
-        <View style={[StyleSheet.absoluteFillObject, { zIndex: 1000 }]}>
-          <TouchableWithoutFeedback onPress={() => toggleDrawer(false)}>
-            <Animated.View style={[styles.drawerBackdrop, { opacity: backdropOpacity }]} />
-          </TouchableWithoutFeedback>
-          <Animated.View
-            style={[
-              styles.drawerContainer,
-              {
-                transform: [{ translateX: drawerAnimation }],
-              },
-            ]}
+        <View style={StyleSheet.absoluteFill}>
+          <AnimatedReanimated.View
+            entering={FadeIn.duration(200)}
+            exiting={FadeOut.duration(150)}
+            style={styles.drawerBackdrop}
           >
-            <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
-              <View style={{ flex: 1 }}>
-                {/* Drawer Header */}
-                <View style={styles.drawerHeader}>
-                  <Text style={styles.drawerTitle}>Conversas Luca</Text>
-                  <TouchableOpacity onPress={() => toggleDrawer(false)}>
-                    <Ionicons name="close" size={24} color={TEXT_DARK} />
-                  </TouchableOpacity>
-                </View>
+            <Pressable style={StyleSheet.absoluteFill} onPress={() => toggleDrawer(false)} />
+          </AnimatedReanimated.View>
 
-                {/* Create New Chat Button */}
-                <TouchableOpacity
-                  style={styles.newChatBtn}
-                  onPress={handleCreateNewChat}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons name="add-circle-outline" size={20} color="#fff" />
-                  <Text style={styles.newChatBtnText}>Nova Conversa</Text>
-                  <Text style={styles.chatCountBadge}>{chats.length}/{MAX_CHATS_LIMIT}</Text>
-                </TouchableOpacity>
+          <AnimatedReanimated.View
+            entering={SlideInRight.duration(250)}
+            exiting={SlideOutRight.duration(200)}
+            style={styles.drawerSheet}
+          >
+            <Typography variant="body" weight="bold" color={Colors.textMuted} style={styles.drawerTitle}>
+              CONVERSAS ATIVAS
+            </Typography>
 
-                {/* Chats List */}
-                {chatsLoading ? (
-                  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-                    <ActivityIndicator size="small" color={PRIMARY_GREEN} />
+            <Button
+              variant="outline"
+              label="Nova conversa"
+              leftIcon={<Ionicons name="add" size={18} color={Colors.textPrimary} />}
+              onPress={handleCreateNewChat}
+              style={styles.newChatBtn}
+            />
+
+            <ScrollView contentContainerStyle={styles.chatsList}>
+              {chats.map((chat) => {
+                const isActive = chat.id === activeChatId;
+                return (
+                  <View key={chat.id} style={[styles.chatItem, isActive && styles.chatItemActive]}>
+                    <TouchableOpacity
+                      style={{ flex: 1, paddingVertical: 12, paddingLeft: 12 }}
+                      onPress={() => {
+                        setActiveChatId(chat.id);
+                        toggleDrawer(false);
+                      }}
+                    >
+                      <Typography variant="body" weight={isActive ? 'bold' : 'regular'} color={isActive ? Colors.primary : Colors.textPrimary}>
+                        {chat.title || 'Conversa'}
+                      </Typography>
+                    </TouchableOpacity>
+                    {chats.length > 1 && (
+                      <TouchableOpacity
+                        style={styles.deleteChatBtn}
+                        onPress={() => handleDeleteChat(chat.id, chat.title)}
+                      >
+                        <Ionicons name="trash-outline" size={16} color={Colors.error} />
+                      </TouchableOpacity>
+                    )}
                   </View>
-                ) : (
-                  <ScrollView contentContainerStyle={styles.drawerScroll} showsVerticalScrollIndicator={false}>
-                    {chats.map((chat) => {
-                      const isActive = chat.id === activeChatId;
-                      return (
-                        <TouchableOpacity
-                          key={chat.id}
-                          style={[styles.chatListItem, isActive && styles.chatListItemActive]}
-                          onPress={() => {
-                            setActiveChatId(chat.id);
-                            toggleDrawer(false);
-                          }}
-                          activeOpacity={0.7}
-                        >
-                          <Ionicons
-                            name="chatbubble-ellipses-outline"
-                            size={18}
-                            color={isActive ? PRIMARY_GREEN : TEXT_GRAY}
-                          />
-                          <Text
-                            style={[styles.chatListItemText, isActive && styles.chatListItemTextActive]}
-                            numberOfLines={1}
-                          >
-                            {chat.title || 'Conversa'}
-                          </Text>
+                );
+              })}
+            </ScrollView>
 
-                          <TouchableOpacity
-                            onPress={() => handleDeleteChat(chat.id, chat.title || 'Conversa')}
-                            style={styles.deleteChatBtn}
-                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                          >
-                            <Ionicons name="trash-outline" size={16} color="#EF4444" />
-                          </TouchableOpacity>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-                )}
+            <Typography variant="body" weight="bold" color={Colors.textMuted} style={[styles.drawerTitle, { marginTop: Spacing.lg }]}>
+              NAVEGAÇÃO
+            </Typography>
 
-                {/* Drawer Footer */}
-                <View style={styles.drawerFooter}>
-                  <Text style={styles.drawerFooterText}>Meu Cesto App • Luca AI</Text>
-                </View>
-              </View>
-            </TouchableWithoutFeedback>
-          </Animated.View>
+            <View style={styles.navBlock}>
+              <TouchableOpacity
+                style={styles.navRow}
+                onPress={() => {
+                  toggleDrawer(false);
+                  setTimeout(() => router.replace('/home'), 150);
+                }}
+              >
+                <Ionicons name="home-outline" size={18} color={Colors.textSecondary} />
+                <Typography variant="body" color={Colors.textSecondary}>Voltar ao Início</Typography>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.navRow}
+                onPress={() => {
+                  toggleDrawer(false);
+                  setTimeout(() => router.replace('/stats'), 150);
+                }}
+              >
+                <Ionicons name="bar-chart-outline" size={18} color={Colors.textSecondary} />
+                <Typography variant="body" color={Colors.textSecondary}>Ver Gastos</Typography>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.navRow}
+                onPress={() => {
+                  toggleDrawer(false);
+                  setTimeout(() => router.replace('/lists'), 150);
+                }}
+              >
+                <Ionicons name="list-outline" size={18} color={Colors.textSecondary} />
+                <Typography variant="body" color={Colors.textSecondary}>Ver Lista</Typography>
+              </TouchableOpacity>
+            </View>
+          </AnimatedReanimated.View>
         </View>
       )}
-    </KeyboardAvoidingView>
+      {/* Global Sidebar navigation drawer */}
+      <Sidebar visible={sidebarVisible} onClose={() => setSidebarVisible(false)} />
+      <AppModal
+        visible={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        title="Excluir conversa"
+        description={deleteTarget ? `A conversa “${deleteTarget.title}” e todas as mensagens serão apagadas permanentemente.` : ''}
+        type="error"
+        destructive
+        confirmLabel="Excluir conversa"
+        cancelLabel="Manter conversa"
+        loading={deletingChat}
+        onConfirm={confirmDeleteChat}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: Colors.background,
   },
   header: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 15,
-    paddingTop: Platform.OS === 'ios' ? 60 : (StatusBar.currentHeight ?? 24) + 10,
-    paddingBottom: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.md,
+    paddingTop: STATUS_BAR_HEIGHT + Spacing.sm,
+    paddingBottom: Spacing.sm,
     borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
-    backgroundColor: '#fff',
+    borderBottomColor: Colors.border,
   },
   headerBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: BG_LIGHT,
+    width: 44,
+    height: 44,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  headerSpacer: {
-    width: 40,
-    height: 40,
-  },
-  headerCenter: {
-    alignItems: 'center',
-    gap: 2,
-  },
-  onlineDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#22C55E',
-    marginBottom: 2,
-  },
-  headerName: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: TEXT_DARK,
-    lineHeight: 18,
-  },
-  headerSub: {
-    fontSize: 11,
-    color: '#22C55E',
-    fontWeight: '700',
-  },
-  modelBadge: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#DCFCE7',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modelBadgeText: {
-    color: PRIMARY_GREEN,
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  loadingState: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  loadingText: {
-    color: TEXT_GRAY,
-    fontWeight: '700',
-  },
-  emptyState: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 20,
-  },
-  emptyStateScroll: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    paddingVertical: 40,
-  },
-  emptyStateInner: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 20,
-  },
-  logo: {
-    width: 90,
-    height: 90,
-    marginBottom: 28,
-  },
-  greetingTitle: {
-    fontSize: 26,
-    fontWeight: '900',
-    color: TEXT_DARK,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  greetingSubtitle: {
-    fontSize: 16,
-    color: TEXT_GRAY,
-    fontWeight: '600',
-    marginBottom: 22,
-    textAlign: 'center',
-    lineHeight: 24,
-    maxWidth: 330,
-  },
-  historyNotice: {
-    minHeight: 36,
+  headerTitleContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    backgroundColor: BG_LIGHT,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    paddingHorizontal: 12,
-    borderRadius: 18,
-    marginBottom: 28,
+    gap: 6,
   },
-  historyNoticeText: {
-    color: TEXT_GRAY,
-    fontSize: 12,
-    fontWeight: '800',
+  chatScroll: {
+    padding: Spacing.lg,
+    gap: Spacing.lg,
+    paddingBottom: 40,
   },
-  quickScrollContainer: {
-    flexGrow: 0,
-    marginBottom: 10,
+  emptyWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.xl,
+    gap: Spacing.md,
   },
-  quickScroll: {
-    paddingHorizontal: 5,
-    gap: 10,
+  lucaAvatarBig: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: Colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
   },
-  chip: {
+  emptySubtitle: {
+    lineHeight: 22,
+    marginBottom: Spacing.lg,
+  },
+  quickActionsWrap: {
+    width: '100%',
+    gap: Spacing.sm,
+  },
+  quickActionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F0FDF4',
+    backgroundColor: Colors.surface,
+    padding: Spacing.md,
+    borderRadius: Radius.md,
     borderWidth: 1,
-    borderColor: '#DCFCE7',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 20,
-    gap: 8,
-  },
-  chipText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: TEXT_DARK,
-  },
-  listContent: {
-    padding: 20,
-    paddingBottom: 10,
-    gap: 12,
+    borderColor: Colors.border,
+    gap: Spacing.sm,
   },
   messageRow: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 8,
-    maxWidth: '92%',
+    gap: Spacing.sm,
+    width: '100%',
   },
   messageRowUser: {
-    alignSelf: 'flex-end',
     flexDirection: 'row-reverse',
   },
   messageRowLuca: {
-    alignSelf: 'flex-start',
+    alignItems: 'flex-end',
   },
   avatarMini: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: '#DCFCE7',
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: Colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    flexShrink: 0,
   },
-  bubble: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 22,
-    flexShrink: 1,
+  messageBubble: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderRadius: Radius.md,
   },
   bubbleUser: {
-    backgroundColor: PRIMARY_GREEN,
-    borderBottomRightRadius: 5,
+    backgroundColor: Colors.primary,
+    borderBottomRightRadius: 4,
   },
   bubbleLuca: {
-    backgroundColor: '#F1F5F9',
-    borderBottomLeftRadius: 5,
+    backgroundColor: Colors.surface,
+    borderBottomLeftRadius: 4,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   markdownBlock: {
-    gap: 3,
+    gap: Spacing.xs,
+  },
+  markdownSpacer: {
+    height: Spacing.sm,
   },
   markdownText: {
     fontSize: 15,
-    color: TEXT_DARK,
-    lineHeight: 22,
-    fontWeight: '500',
+    lineHeight: 21,
   },
   markdownTextUser: {
-    color: '#fff',
+    color: '#080A09',
+    fontWeight: '500',
   },
   markdownBold: {
-    fontWeight: '900',
-  },
-  markdownHeading: {
-    color: TEXT_DARK,
-    fontSize: 16,
-    lineHeight: 23,
-    fontWeight: '900',
-  },
-  markdownSpacer: {
-    height: 4,
+    fontWeight: 'bold',
   },
   bulletRow: {
     flexDirection: 'row',
-    gap: 7,
-    alignItems: 'flex-start',
-  },
-  bulletDot: {
-    color: TEXT_DARK,
-    fontSize: 15,
-    lineHeight: 22,
-    fontWeight: '900',
-  },
-  numberMarker: {
-    color: TEXT_DARK,
-    fontSize: 15,
-    lineHeight: 22,
-    fontWeight: '800',
-    minWidth: 22,
+    gap: Spacing.xs,
   },
   bulletText: {
     flex: 1,
   },
-  copyButton: {
-    marginTop: 10,
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  copyText: {
-    color: TEXT_GRAY,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  typingDots: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: 4,
-  },
-  typingDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: PRIMARY_GREEN,
-  },
-  thinkingText: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    fontWeight: '700',
-    marginTop: 4,
-  },
   chartCard: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 14,
-    marginTop: 12,
-    gap: 10,
+    borderColor: Colors.border,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    gap: Spacing.md,
+    width: '100%',
   },
   chartHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 10,
-  },
-  chartTitle: {
-    color: TEXT_DARK,
-    fontSize: 13,
-    fontWeight: '900',
-  },
-  chartTotal: {
-    color: PRIMARY_GREEN,
-    fontSize: 13,
-    fontWeight: '900',
   },
   chartRow: {
-    gap: 5,
+    gap: Spacing.xs,
   },
   chartLabelRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    gap: 10,
   },
-  chartLabel: {
-    color: TEXT_GRAY,
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  chartValue: {
-    color: TEXT_DARK,
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  chartTrack: {
-    height: 7,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
-  chartFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  inputArea: {
-    paddingHorizontal: 15,
-    paddingTop: 10,
-    paddingBottom: Platform.OS === 'ios' ? 35 : 15,
-    backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
-  },
-  inputAreaWithTabs: {
-    paddingBottom: Platform.OS === 'ios' ? 112 : 92,
-  },
-  inputBox: {
+  inputBar: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    backgroundColor: BG_LIGHT,
-    borderRadius: 28,
-    paddingHorizontal: 18,
-    paddingVertical: 8,
-    gap: 10,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.md,
+    backgroundColor: Colors.background,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    gap: Spacing.sm,
   },
   textInput: {
     flex: 1,
-    fontSize: 16,
-    color: TEXT_DARK,
-    fontWeight: '500',
-    maxHeight: 120,
-    paddingTop: Platform.OS === 'ios' ? 8 : 6,
-    paddingBottom: Platform.OS === 'ios' ? 8 : 6,
-    ...Platform.select({
-      web: {
-        outlineStyle: 'none',
-      } as any,
-    }),
+    height: 44,
+    borderRadius: Radius.sm,
+    backgroundColor: Colors.surface,
+    color: Colors.textPrimary,
+    paddingHorizontal: Spacing.md,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   sendBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: TEXT_DARK,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: Colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    flexShrink: 0,
   },
   sendBtnDisabled: {
-    backgroundColor: '#CBD5E1',
-  },
-  disclaimer: {
-    fontSize: 11,
-    color: '#94A3B8',
-    textAlign: 'center',
-    marginTop: 8,
-    fontWeight: '500',
+    backgroundColor: Colors.surfaceElevated,
+    opacity: 0.5,
   },
   drawerBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
   },
-  drawerContainer: {
+  drawerSheet: {
     position: 'absolute',
-    left: 0,
+    right: 0,
     top: 0,
     bottom: 0,
-    width: Dimensions.get('window').width * 0.78,
-    backgroundColor: '#fff',
-    borderTopRightRadius: 24,
-    borderBottomRightRadius: 24,
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 4, height: 0 },
-    shadowOpacity: 0.15,
-    shadowRadius: 16,
-    elevation: 24,
-    zIndex: 110,
-  },
-  drawerHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginBottom: 20,
+    width: '78%',
+    backgroundColor: Colors.surfaceElevated,
+    padding: Spacing.xl,
+    paddingTop: STATUS_BAR_HEIGHT + Spacing.lg,
+    borderLeftWidth: 1,
+    borderLeftColor: Colors.border,
+    gap: Spacing.lg,
   },
   drawerTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: TEXT_DARK,
+    letterSpacing: 0.5,
   },
   newChatBtn: {
+    width: '100%',
+  },
+  chatsList: {
+    gap: Spacing.sm,
+  },
+  chatItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: PRIMARY_GREEN,
-    marginHorizontal: 15,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 16,
-    gap: 10,
-    marginBottom: 16,
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 4,
+    justifyContent: 'space-between',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-  newChatBtnText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '800',
-    flex: 1,
-  },
-  chatCountBadge: {
-    color: '#fff',
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    paddingVertical: 2,
-    paddingHorizontal: 8,
-    borderRadius: 10,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  drawerScroll: {
-    paddingHorizontal: 10,
-    paddingBottom: 20,
-    gap: 8,
-  },
-  chatListItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 14,
-    gap: 10,
-    backgroundColor: 'transparent',
-  },
-  chatListItemActive: {
-    backgroundColor: '#ECFDF5',
-  },
-  chatListItemText: {
-    flex: 1,
-    fontSize: 14,
-    color: TEXT_GRAY,
-    fontWeight: '600',
-  },
-  chatListItemTextActive: {
-    color: PRIMARY_GREEN,
-    fontWeight: '800',
+  chatItemActive: {
+    borderColor: Colors.primary,
   },
   deleteChatBtn: {
-    padding: 4,
+    padding: 12,
   },
-  drawerFooter: {
-    paddingTop: 15,
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
-    alignItems: 'center',
-    marginHorizontal: 20,
-    marginTop: 'auto',
+  typingDots: {
+    flexDirection: 'row',
+    gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
   },
-  drawerFooterText: {
-    fontSize: 11,
-    color: '#94A3B8',
-    fontWeight: '600',
+  typingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: Colors.primary,
   },
-  limitBadge: {
+  navBlock: {
+    gap: Spacing.sm,
+    marginTop: Spacing.sm,
+  },
+  navRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    marginBottom: 8,
-    alignSelf: 'center',
-  },
-  limitBadgeWarning: {
-    backgroundColor: '#FEF3C7',
-  },
-  limitBadgeBlocked: {
-    backgroundColor: '#FEE2E2',
-  },
-  limitBadgeText: {
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  limitBadgeTextWarning: {
-    color: '#D97706',
-  },
-  limitBadgeTextBlocked: {
-    color: '#DC2626',
+    padding: Spacing.md,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    gap: Spacing.sm,
   },
 });

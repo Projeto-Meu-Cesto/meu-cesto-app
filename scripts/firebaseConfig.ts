@@ -1,4 +1,5 @@
 import { initializeApp } from "firebase/app";
+// @ts-expect-error getReactNativePersistence is available in React Native build of firebase/auth
 import { initializeAuth, getReactNativePersistence } from "firebase/auth";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { initializeFirestore } from "firebase/firestore";
@@ -24,6 +25,7 @@ export const missingFirebaseVars = [
     .filter(([, value]) => !value || String(value).startsWith("demo"))
     .map(([key]) => key);
 export const isFirebaseConfigured = missingFirebaseVars.length === 0;
+export const isFirebaseAiConfigured = isFirebaseConfigured;
 
 if (!isFirebaseConfigured) {
     console.warn(

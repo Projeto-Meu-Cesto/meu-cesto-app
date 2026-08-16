@@ -1,24 +1,38 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { collection, getDocs, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { addDoc, collection, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Animated,
   Dimensions,
   Modal,
   Pressable,
   ScrollView,
   StatusBar,
   StyleSheet,
-  Text,
   TouchableOpacity,
   View,
+  RefreshControl,
 } from 'react-native';
-import { PullToRefreshScroll } from '../../components/PullToRefreshScroll';
-import { BG_LIGHT, PRIMARY_GREEN, STATUS_BAR_HEIGHT, TEXT_DARK, TEXT_GRAY, WARNING } from '../../constants/theme';
+import Animated, { 
+  FadeInUp, 
+  FadeInDown,
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring
+} from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
+
+import { Colors, Spacing, Radius, STATUS_BAR_HEIGHT } from '../../constants/theme';
 import { getCachedPurchases, mergePurchaseRecords, type PurchaseRecord } from '../../scripts/financeContext';
 import { auth, db } from '../../scripts/firebaseConfig';
 import { getItemTotal, getQuantity, parseMoney, toDate, toMonthKey, wait } from '../../scripts/utils';
+import { useToast } from '../../context/ToastContext';
+
+// UI Design System Components
+import { Typography } from '../../components/ui/Typography';
+import { Card } from '../../components/ui/Card';
+import { ProgressBar } from '../../components/ui/ProgressBar';
+import { useSidebar } from '../../components/ui/Sidebar';
 
 const { width, height: windowHeight } = Dimensions.get('window');
 const HOME_LOAD_TIMEOUT_MS = 4500;
@@ -54,17 +68,10 @@ type ListSummary = {
   confirmed: number;
 };
 
-type Greeting = {
-  morning: string,
-  afternoon: string,
-  evening: string,
-}
-
 function getPurchaseItemTotal(item: NonNullable<PurchaseRecord['items']>[number]) {
   if (typeof item.total === 'number' && Number.isFinite(item.total)) {
     return item.total;
   }
-
   return parseMoney(item.price) * getQuantity(item.quantity);
 }
 
@@ -82,11 +89,9 @@ function buildListSummary(items: ShoppingListItem[], purchases: PurchaseRecord[]
     (purchase.items || []).forEach((item) => {
       const amount = getPurchaseItemTotal(item);
       if (amount <= 0) return;
-
       if (item.sourceItemId) {
         purchasedSourceIds.add(item.sourceItemId);
       }
-
       spent += amount;
       confirmed += 1;
     });
@@ -94,10 +99,8 @@ function buildListSummary(items: ShoppingListItem[], purchases: PurchaseRecord[]
 
   checkedItems.forEach((item) => {
     if (purchasedSourceIds.has(item.id)) return;
-
     const amount = getItemTotal(item);
     if (amount <= 0) return;
-
     spent += amount;
     confirmed += 1;
   });
@@ -121,74 +124,28 @@ function formatCurrency(value: number) {
   });
 }
 
-function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
-  const opacity = React.useRef(new Animated.Value(0.4)).current;
-  React.useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
-        Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
-      ])
-    ).start();
-  }, [opacity]);
-  return (
-    <Animated.View
-      style={[
-        { width: w, height: h, backgroundColor: '#E2E8F0', borderRadius: 10, opacity },
-        style,
-      ]}
-    />
-  );
-}
+function usePressAnimation() {
+  const scale = useSharedValue(1);
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
 
-function SkeletonListItem() {
-  return (
-    <View style={skStyles.row}>
-      <SkeletonBox width={12} height={12} style={{ borderRadius: 6, marginRight: 14 }} />
-      <SkeletonBox width="55%" height={14} />
-      <SkeletonBox width={50} height={14} style={{ marginLeft: 'auto' }} />
-    </View>
-  );
-}
+  const pressIn = () => {
+    scale.value = withSpring(0.96, { damping: 10, stiffness: 300 });
+  };
+  const pressOut = () => {
+    scale.value = withSpring(1, { damping: 10, stiffness: 300 });
+  };
 
-function SkeletonMainCard() {
-  return (
-    <View style={styles.mainCard}>
-      <SkeletonBox width={130} height={13} style={skStyles.onGreen} />
-      <SkeletonBox width={200} height={36} style={[skStyles.onGreen, { marginTop: 10 }]} />
-      <SkeletonBox width={220} height={12} style={[skStyles.onGreen, { marginTop: 10 }]} />
-    </View>
-  );
+  return { animatedStyle, pressIn, pressOut };
 }
-
-function SkeletonQuickCard() {
-  return (
-    <View style={styles.catCard}>
-      <SkeletonBox width={40} height={40} style={{ borderRadius: 12, marginBottom: 8 }} />
-      <SkeletonBox width={56} height={10} style={{ marginBottom: 6 }} />
-      <SkeletonBox width={48} height={14} />
-    </View>
-  );
-}
-
-const skStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 10,
-  },
-  onGreen: {
-    backgroundColor: 'rgba(255, 255, 255, 0.35)',
-  },
-});
 
 export default function HomeScreen() {
   const router = useRouter();
   const user = auth.currentUser;
-  const [weeklyList, setWeeklyList] = useState<ShoppingListItem[]>([]);
+  const { showToast } = useToast();
+  const { setVisible: setSidebarVisible } = useSidebar();
+  const [purchases, setPurchases] = useState<PurchaseRecord[]>([]);
   const [listSummary, setListSummary] = useState<ListSummary>({
     total: 0,
     checked: 0,
@@ -197,47 +154,50 @@ export default function HomeScreen() {
     spent: 0,
     confirmed: 0,
   });
-  const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [notificationsSeen, setNotificationsSeen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
-
-  const showSkeleton = loading || isRefreshing;
+  const [dismissedInsight, setDismissedInsight] = useState(false);
 
   const refreshHomeData = React.useCallback(async () => {
     if (!user) return;
+    setIsRefreshing(true);
+    try {
+      const shoppingQuery = query(
+        collection(db, 'users', user.uid, 'shopping_list'),
+        orderBy('createdAt', 'desc')
+      );
+      const purchasesQuery = query(
+        collection(db, 'users', user.uid, 'purchases'),
+        orderBy('finalizedAt', 'desc'),
+        limit(120)
+      );
 
-    const shoppingQuery = query(
-      collection(db, 'users', user.uid, 'shopping_list'),
-      orderBy('createdAt', 'desc')
-    );
-    const purchasesQuery = query(
-      collection(db, 'users', user.uid, 'purchases'),
-      orderBy('finalizedAt', 'desc'),
-      limit(120)
-    );
+      const [listSnap, purchasesSnap, cachedPurchases] = await Promise.all([
+        getDocs(shoppingQuery),
+        getDocs(purchasesQuery),
+        getCachedPurchases(user.uid),
+      ]);
 
-    const [listSnap, purchasesSnap, cachedPurchases] = await Promise.all([
-      getDocs(shoppingQuery),
-      getDocs(purchasesQuery),
-      getCachedPurchases(user.uid),
-    ]);
+      const shoppingItems = listSnap.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      })) as ShoppingListItem[];
 
-    const shoppingItems = listSnap.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    })) as ShoppingListItem[];
+      const firestorePurchases = purchasesSnap.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      })) as PurchaseRecord[];
 
-    const firestorePurchases = purchasesSnap.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    })) as PurchaseRecord[];
-
-    const purchases = mergePurchaseRecords(firestorePurchases, cachedPurchases);
-    setWeeklyList(shoppingItems.slice(0, 4));
-    setListSummary(buildListSummary(shoppingItems, purchases));
-    setDataVersion((v) => v + 1);
+      const merged = mergePurchaseRecords(firestorePurchases, cachedPurchases);
+      setPurchases(merged);
+      setListSummary(buildListSummary(shoppingItems, merged));
+      setDataVersion((v) => v + 1);
+    } catch (e) {
+      console.warn('Erro ao atualizar dados da Home', e);
+    } finally {
+      setIsRefreshing(false);
+    }
     await wait(350);
   }, [user]);
 
@@ -254,17 +214,16 @@ export default function HomeScreen() {
 
     const publishSummary = () => {
       if (!active) return;
-
-      const purchases = mergePurchaseRecords(firestorePurchases, cachedPurchases);
-      setWeeklyList(shoppingItems.slice(0, 4));
-      setListSummary(buildListSummary(shoppingItems, purchases));
+      const merged = mergePurchaseRecords(firestorePurchases, cachedPurchases);
+      setPurchases(merged);
+      setListSummary(buildListSummary(shoppingItems, merged));
       setLoading(false);
     };
 
     getCachedPurchases(user.uid)
-      .then((purchases) => {
-        cachedPurchases = purchases;
-        if (purchases.length > 0) {
+      .then((mergedPurchases) => {
+        cachedPurchases = mergedPurchases;
+        if (mergedPurchases.length > 0) {
           publishSummary();
         }
       })
@@ -293,12 +252,10 @@ export default function HomeScreen() {
       (snapshot) => {
         receivedSnapshot = true;
         clearTimeout(loadingTimer);
-
         shoppingItems = snapshot.docs.map((doc) => ({
           id: doc.id,
           ...doc.data(),
         })) as ShoppingListItem[];
-
         publishSummary();
       },
       (error) => {
@@ -316,7 +273,6 @@ export default function HomeScreen() {
           id: doc.id,
           ...doc.data(),
         })) as PurchaseRecord[];
-
         publishSummary();
       },
       (error) => {
@@ -333,274 +289,459 @@ export default function HomeScreen() {
     };
   }, [user, dataVersion]);
 
-  const notifications = useMemo<HomeNotification[]>(() => {
-    const totalSpent = listSummary.spent;
-    const messages: HomeNotification[] = [
-      {
-        id: 'month-total',
-        icon: 'wallet-outline',
-        title: 'Gastos confirmados',
-        description: totalSpent > 0
-          ? `Você marcou ${formatCurrency(totalSpent)} como comprado.`
-          : 'Nenhum item foi marcado como comprado ainda.',
-        color: PRIMARY_GREEN,
-        actionLabel: 'Ver finanças',
-        action: () => router.push('/stats'),
-      },
-      {
-        id: 'shopping-list',
-        icon: listSummary.pending > 0 ? 'cart-outline' : 'checkmark-circle-outline',
-        title: listSummary.pending > 0 ? 'Itens pendentes' : 'Lista em dia',
-        description: listSummary.total > 0
-          ? `${listSummary.pending} pendente(s), ${listSummary.checked} no carrinho. Estimativa: ${formatCurrency(listSummary.estimated)}.`
-          : 'Sua lista ainda está vazia. Adicione itens para acompanhar melhor seus gastos.',
-        color: listSummary.pending > 0 ? WARNING : PRIMARY_GREEN,
-        actionLabel: listSummary.total > 0 ? 'Abrir lista' : 'Adicionar item',
-        action: () => router.push(listSummary.total > 0 ? '/lists' : '/addItem'),
-      },
-      {
-        id: 'luca',
-        icon: 'sparkles-outline',
-        title: 'Luca pronto para ajudar',
-        description: 'Peça dicas de economia com base nos seus itens e gastos reais.',
-        color: '#38BDF8',
-        actionLabel: 'Falar com Luca',
-        action: () => router.push('/luca-tab' as any),
-      },
-    ];
+  const realChartData = useMemo(() => {
+    const data = Array(12).fill(0);
+    const now = new Date();
+    const msInDay = 24 * 60 * 60 * 1000;
 
-    if (listSummary.pending >= 5) {
-      messages.unshift({
-        id: 'many-pending',
-        icon: 'alert-circle-outline',
-        title: 'Lista ficando grande',
-        description: `Você tem ${listSummary.pending} itens pendentes. Vale revisar antes de ir ao mercado.`,
-        color: '#EF4444',
-        actionLabel: 'Revisar agora',
-        action: () => router.push('/lists'),
+    purchases.forEach((purchase) => {
+      const pDate = toDate(purchase.finalizedAt) || toDate(purchase.createdAt);
+      if (!pDate) return;
+      const diffDays = Math.floor((now.getTime() - pDate.getTime()) / msInDay);
+      if (diffDays >= 0 && diffDays < 12) {
+        const amount = (purchase.items || []).reduce((acc, item) => acc + getPurchaseItemTotal(item), 0);
+        data[11 - diffDays] += amount;
+      }
+    });
+
+    const sum = data.reduce((a, b) => a + b, 0);
+    if (sum === 0) {
+      return Array(12).fill(0);
+    }
+    return data;
+  }, [purchases]);
+
+  const maxChartValue = Math.max(...realChartData, 1);
+
+  const { currentMonthSpent, previousMonthSpent } = useMemo(() => {
+     const now = new Date();
+     const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+     const prevMonthKey = toMonthKey(prevDate);
+     
+     let prev = 0;
+     purchases.forEach(purchase => {
+       const pDate = toDate(purchase.finalizedAt) || toDate(purchase.createdAt);
+       if (!pDate) return;
+       if (toMonthKey(pDate) === prevMonthKey) {
+         const amount = (purchase.items || []).reduce((acc, item) => acc + getPurchaseItemTotal(item), 0);
+         prev += amount;
+       }
+     });
+
+     return { currentMonthSpent: listSummary.spent, previousMonthSpent: prev };
+  }, [purchases, listSummary.spent]);
+
+  const trendPercentage = previousMonthSpent > 0 
+    ? Math.round(((currentMonthSpent - previousMonthSpent) / previousMonthSpent) * 100) 
+    : 0;
+  const trendDiff = currentMonthSpent - previousMonthSpent;
+
+  const smartInsight = useMemo(() => {
+    if (!purchases || purchases.length === 0) return null;
+
+    const itemCounts: Record<string, number> = {};
+    const itemDays: Record<string, number[]> = {};
+
+    purchases.forEach(purchase => {
+      const pDate = toDate(purchase.finalizedAt) || toDate(purchase.createdAt);
+      if (!pDate) return;
+      const dayOfWeek = pDate.getDay();
+
+      (purchase.items || []).forEach(item => {
+         if (!item.name) return;
+         const name = item.name.toLowerCase().trim();
+         itemCounts[name] = (itemCounts[name] || 0) + 1;
+         if (!itemDays[name]) itemDays[name] = [];
+         itemDays[name].push(dayOfWeek);
       });
-    }
+    });
 
-    return messages;
-  }, [listSummary, router]);
+    const sortedItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]);
+    if (sortedItems.length === 0) return null;
+    
+    const topItemName = sortedItems[0][0];
+    const count = sortedItems[0][1];
 
-  const quickCards = useMemo(() => [
-    { id: 'pending', label: 'Pendentes', value: String(listSummary.pending), icon: 'cart-outline' },
-    { id: 'checked', label: 'No carrinho', value: String(listSummary.checked), icon: 'checkmark-circle-outline' },
-    { id: 'estimated', label: 'Estimado', value: formatCurrency(listSummary.estimated), icon: 'calculator-outline' },
-  ], [listSummary]);
+    if (count < 2) return null;
 
-  const openNotifications = () => {
-    setNotificationsOpen(true);
-    setNotificationsSeen(true);
+    const days = itemDays[topItemName];
+    const dayCounts: Record<number, number> = {};
+    days.forEach(d => dayCounts[d] = (dayCounts[d] || 0) + 1);
+    const mostCommonDay = parseInt(Object.entries(dayCounts).sort((a, b) => b[1] - a[1])[0][0]);
+
+    const daysOfWeek = ['aos domingos', 'às segundas', 'às terças', 'às quartas', 'às quintas', 'às sextas', 'aos sábados'];
+    const dayName = daysOfWeek[mostCommonDay];
+    
+    const formattedItemName = topItemName.charAt(0).toUpperCase() + topItemName.slice(1);
+
+    return {
+      item: formattedItemName,
+      day: dayName,
+      message: `Você costuma comprar ${topItemName} ${dayName}.`,
+    };
+  }, [purchases]);
+
+  const handleAddInsightItem = async () => {
+      if (!user || !smartInsight) return;
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        await addDoc(collection(db, 'users', user.uid, 'shopping_list'), {
+          name: smartInsight.item,
+          quantity: '1 un',
+          checked: false,
+          createdAt: serverTimestamp(),
+        });
+        showToast('Produto adicionado à lista!', 'success');
+        setDismissedInsight(true);
+      } catch (e) {
+        console.error(e);
+        showToast('Erro ao adicionar produto.', 'error');
+      }
   };
 
-  const closeNotifications = () => {
-    setNotificationsOpen(false);
-  };
-
-  const handleNotificationAction = (notification: HomeNotification) => {
-    setNotificationsOpen(false);
-    notification.action?.();
-  };
-
-  const greeting = (greeting: Greeting) => {
-    const hour = new Date().getHours();
-    if (hour < 12) {
-      return greeting.morning;
-    }
-    if (hour < 18) {
-      return greeting.afternoon;
-    }
-    return greeting.evening;
-  }
+  const button1Anim = usePressAnimation();
+  const button2Anim = usePressAnimation();
+  const button3Anim = usePressAnimation();
+  const button4Anim = usePressAnimation();
+  const button5Anim = usePressAnimation();
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
 
-      <PullToRefreshScroll
-        lockScrollDown
+      <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={[styles.scrollContent, { minHeight: windowHeight }]}
-        refreshOffset={STATUS_BAR_HEIGHT + 8}
-        backgroundColor={PRIMARY_GREEN}
-        onRefreshingChange={setIsRefreshing}
-        onRefresh={refreshHomeData}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={refreshHomeData}
+            tintColor={Colors.primary}
+            colors={[Colors.primary]}
+          />
+        }
       >
-        {/* Header */}
-        <View style={styles.header}>
+        <Animated.View entering={FadeInUp.duration(400)} style={styles.header}>
           <View style={styles.headerTop}>
-            <View>
-              <Text style={styles.greeting}>{greeting({ morning: 'Bom dia', afternoon: 'Boa tarde', evening: 'Boa noite' })},</Text>
-              <Text style={styles.userName}>{user?.displayName || 'Usuário'}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.md }}>
+              <TouchableOpacity
+                style={styles.menuButton}
+                onPress={() => setSidebarVisible(true)}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityLabel="Abrir menu"
+              >
+                <Ionicons name="menu-outline" size={24} color={Colors.textPrimary} />
+              </TouchableOpacity>
+              <View>
+                <Typography variant="title" weight="bold" color={Colors.textPrimary} style={styles.headerTitle}>
+                  Olá, {user?.displayName ? user.displayName.split(' ')[0] : 'Guilherme'}
+                </Typography>
+                <Typography variant="body" color={Colors.textMuted}>
+                  Vamos economizar hoje?
+                </Typography>
+              </View>
             </View>
-            <TouchableOpacity
-              style={styles.notificationCircle}
-              onPress={openNotifications}
-              activeOpacity={0.75}
-              accessibilityRole="button"
-              accessibilityLabel="Abrir notificações"
-            >
-              <Ionicons name="notifications" size={20} color="#fff" />
-              {!notificationsSeen && <View style={styles.activeDot} />}
-            </TouchableOpacity>
+            <View style={styles.headerRight}>
+              <TouchableOpacity 
+                style={styles.notificationCircle} 
+                onPress={() => router.push('/notifications')}
+                accessibilityRole="button"
+                accessibilityLabel="Ver notificações"
+              >
+                <Ionicons name="notifications-outline" size={20} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
           </View>
-
-          {showSkeleton ? (
-            <SkeletonMainCard />
-          ) : (
-            <View style={styles.mainCard}>
-              <Text style={styles.mainCardLabel}>Gasto confirmado</Text>
-              <Text style={styles.mainCardAmount}>{formatCurrency(listSummary.spent)}</Text>
-              <Text style={styles.mainCardSubtitle}>
-                {listSummary.confirmed} item(ns) confirmados neste mês
-              </Text>
-            </View>
-          )}
-        </View>
+        </Animated.View>
 
         <View style={styles.mainContent}>
-          {/* Categories */}
-          <View style={styles.categoriesRow}>
-            {showSkeleton ? (
-              <>
-                <SkeletonQuickCard />
-                <SkeletonQuickCard />
-                <SkeletonQuickCard />
-              </>
-            ) : (
-              quickCards.map((cat) => (
-                <CategoryCard key={cat.id} icon={cat.icon} label={cat.label} value={cat.value} />
-              ))
-            )}
-          </View>
-
-          {/* Weekly List */}
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>LISTA DA SEMANA</Text>
-            <TouchableOpacity onPress={() => router.push('/lists')}>
-              <Text style={styles.seeAll}>Ver tudo →</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.listContainer}>
-            {showSkeleton ? (
-              <>
-                <SkeletonListItem />
-                <SkeletonListItem />
-                <SkeletonListItem />
-              </>
-            ) : weeklyList.length > 0 ? (
-              weeklyList.map((item: any) => (
-                <ListItem
-                  key={item.id}
-                  name={item.name}
-                  price={item.price}
-                  quantity={item.quantity}
-                  color={item.color || '#CBD5E1'}
-                />
-              ))
-            ) : (
-              <View style={styles.emptyBox}>
-                <Ionicons name="cart-outline" size={32} color="#CBD5E1" />
-                <Text style={styles.emptyText}>Nenhum item adicionado à lista.</Text>
+          <Animated.View entering={FadeInDown.delay(100).duration(500)}>
+            <Card elevated style={styles.spendingCard}>
+              <View style={styles.spendingHeader}>
+                <Typography variant="caption" weight="bold" color={Colors.textMuted}>
+                  GASTOS DESTE MÊS
+                </Typography>
+                {previousMonthSpent > 0 && (
+                  <View style={[styles.trendLabel, trendPercentage > 0 && { backgroundColor: 'rgba(239, 68, 68, 0.1)' }]}>
+                    <Typography variant="caption" weight="bold" color={trendPercentage > 0 ? Colors.error : Colors.primary}>
+                      {trendPercentage > 0 ? '↗' : '↘'} {Math.abs(trendPercentage)}%
+                    </Typography>
+                  </View>
+                )}
               </View>
-            )}
-          </View>
+              <Typography variant="display" weight="heavy" color={Colors.textPrimary} style={styles.spendingAmount}>
+                {formatCurrency(currentMonthSpent)}
+              </Typography>
+              <View style={styles.spendingSubtitleRow}>
+                <Typography variant="caption" color={Colors.textMuted}>
+                  comparado ao mês anterior
+                </Typography>
+                <Typography variant="caption" weight="bold" color={trendDiff > 0 ? Colors.error : Colors.primary}>
+                  {trendDiff === 0 
+                    ? 'Mesmo valor' 
+                    : `${trendDiff > 0 ? '+' : '-'} R$ ${Math.abs(trendDiff).toFixed(2).replace('.', ',')} ${trendDiff > 0 ? 'acima' : 'abaixo'}`}
+                </Typography>
+              </View>
+              <View style={styles.miniChartContainer}>
+                {realChartData.map((val, idx) => (
+                  <View 
+                    key={idx} 
+                    style={[
+                      styles.miniChartBar, 
+                      { 
+                        height: Math.max(10, (val / maxChartValue) * 35), 
+                        backgroundColor: Colors.primary 
+                      }
+                    ]} 
+                  />
+                ))}
+              </View>
+            </Card>
+          </Animated.View>
 
-          {/* Falar com Luca */}
-          <TouchableOpacity style={styles.lucaBtn} onPress={() => router.push('/luca-tab' as any)}>
-            <View style={styles.lucaBtnLeft}>
-              <View style={styles.lucaIconBg}>
-                <Ionicons name="sparkles" size={20} color={PRIMARY_GREEN} />
-              </View>
-              <View>
-                <Text style={styles.lucaBtnTitle}>Falar com Luca</Text>
-                <Text style={styles.lucaBtnSub}>Insights e dicas com IA</Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={PRIMARY_GREEN} />
-          </TouchableOpacity>
-        </View>
-      </PullToRefreshScroll>
-
-      <Modal visible={notificationsOpen} transparent animationType="fade" onRequestClose={closeNotifications}>
-        <View style={styles.modalOverlay}>
-          <Pressable style={styles.modalBackdrop} onPress={closeNotifications} />
-          <View style={styles.notificationPanel}>
-            <View style={styles.notificationHeader}>
-              <View>
-                <Text style={styles.notificationTitle}>Notificações</Text>
-                <Text style={styles.notificationSubtitle}>Resumo rápido do seu cesto</Text>
-              </View>
-              <TouchableOpacity style={styles.closeButton} onPress={closeNotifications}>
-                <Ionicons name="close" size={22} color={TEXT_DARK} />
+          <Animated.View entering={FadeInDown.delay(200).duration(500)}>
+            <View style={styles.sectionHeader}>
+              <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                Próxima compra
+              </Typography>
+              <TouchableOpacity onPress={() => router.push('/lists')}>
+                <Typography variant="caption" weight="bold" color={Colors.primary}>
+                  Ver lista
+                </Typography>
               </TouchableOpacity>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.notificationList}>
-              {notifications.map(notification => (
-                <View key={notification.id} style={styles.notificationItem}>
-                  <View style={[styles.notificationIcon, { backgroundColor: `${notification.color}18` }]}>
-                    <Ionicons name={notification.icon} size={20} color={notification.color} />
-                  </View>
-                  <View style={styles.notificationBody}>
-                    <Text style={styles.notificationItemTitle}>{notification.title}</Text>
-                    <Text style={styles.notificationDescription}>{notification.description}</Text>
-                    {notification.actionLabel && (
-                      <TouchableOpacity
-                        style={styles.notificationAction}
-                        onPress={() => handleNotificationAction(notification)}
-                      >
-                        <Text style={styles.notificationActionText}>{notification.actionLabel}</Text>
-                        <Ionicons name="chevron-forward" size={16} color={PRIMARY_GREEN} />
-                      </TouchableOpacity>
-                    )}
-                  </View>
+            <Card elevated style={styles.nextPurchaseCard}>
+              <View style={styles.nextPurchaseHeader}>
+                <View style={styles.purchaseIconContainer}>
+                  <Ionicons name="basket" size={20} color={Colors.primary} />
                 </View>
-              ))}
-            </ScrollView>
-          </View>
+                <View style={{ flex: 1 }}>
+                  <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                    Lista da semana
+                  </Typography>
+                  <Typography variant="caption" color={Colors.textMuted}>
+                    {listSummary.checked}/{listSummary.total} itens organizados
+                  </Typography>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Typography variant="body" weight="heavy" color={Colors.primary}>
+                    {formatCurrency(listSummary.estimated || 0)}
+                  </Typography>
+                  <Typography variant="caption" color={Colors.textMuted}>
+                    estimativa
+                  </Typography>
+                </View>
+              </View>
+
+              <ProgressBar 
+                progress={listSummary.total > 0 ? listSummary.checked / listSummary.total : 0} 
+                color={Colors.primary} 
+                height={6} 
+              />
+              
+              <View style={styles.percentRow}>
+                <Typography variant="caption" color={Colors.textSecondary}>
+                  {listSummary.total > 0 ? Math.round((listSummary.checked / listSummary.total) * 100) : 0}% concluida
+                </Typography>
+              </View>
+
+              <Animated.View style={button1Anim.animatedStyle}>
+                <Pressable
+                  onPressIn={button1Anim.pressIn}
+                  onPressOut={button1Anim.pressOut}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    router.push('/lists');
+                  }}
+                  style={styles.continueButton}
+                >
+                  <Ionicons name="arrow-forward" size={18} color="#080A09" style={{ marginRight: 6 }} />
+                  <Typography variant="body" weight="bold" color="#080A09">
+                    Continuar lista
+                  </Typography>
+                </Pressable>
+              </Animated.View>
+            </Card>
+          </Animated.View>
+
+          <Animated.View entering={FadeInDown.delay(300).duration(500)}>
+            <Typography variant="body" weight="bold" color={Colors.textPrimary} style={styles.sectionLabel}>
+              Ações rápidas
+            </Typography>
+
+            <View style={styles.quickActionsGrid}>
+              <Animated.View style={[styles.gridCell, button2Anim.animatedStyle]}>
+                <Pressable
+                  onPressIn={button2Anim.pressIn}
+                  onPressOut={button2Anim.pressOut}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    router.push('/catalog');
+                  }}
+                  style={styles.gridPressable}
+                >
+                  <View style={styles.gridIconCircle}>
+                    <Ionicons name="add" size={20} color={Colors.primary} />
+                  </View>
+                  <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                    Comprar online
+                  </Typography>
+                  <Typography variant="caption" color={Colors.textMuted}>
+                    Catálogo do mercado
+                  </Typography>
+                </Pressable>
+              </Animated.View>
+
+              <Animated.View style={[styles.gridCell, button3Anim.animatedStyle]}>
+                <Pressable
+                  onPressIn={button3Anim.pressIn}
+                  onPressOut={button3Anim.pressOut}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    router.push('/lists');
+                  }}
+                  style={styles.gridPressable}
+                >
+                  <View style={styles.gridIconCircle}>
+                    <Ionicons name="list" size={20} color={Colors.primary} />
+                  </View>
+                  <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                    Nova lista
+                  </Typography>
+                  <Typography variant="caption" color={Colors.textMuted}>
+                    Para o fim de semana
+                  </Typography>
+                </Pressable>
+              </Animated.View>
+
+              <Animated.View style={[styles.gridCell, button4Anim.animatedStyle]}>
+                <Pressable
+                  onPressIn={button4Anim.pressIn}
+                  onPressOut={button4Anim.pressOut}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    router.push('/stats');
+                  }}
+                  style={styles.gridPressable}
+                >
+                  <View style={styles.gridIconCircle}>
+                    <Ionicons name="card-outline" size={20} color={Colors.primary} />
+                  </View>
+                  <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                    Registrar gasto
+                  </Typography>
+                  <Typography variant="caption" color={Colors.textMuted}>
+                    R$ 0,00
+                  </Typography>
+                </Pressable>
+              </Animated.View>
+
+              <Animated.View style={[styles.gridCell, button5Anim.animatedStyle]}>
+                <Pressable
+                  onPressIn={button5Anim.pressIn}
+                  onPressOut={button5Anim.pressOut}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    router.push('/luca');
+                  }}
+                  style={styles.gridPressable}
+                >
+                  <View style={styles.gridIconCircle}>
+                    <Ionicons name="star" size={20} color={Colors.primary} />
+                  </View>
+                  <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                    Perguntar ao Luca
+                  </Typography>
+                  <Typography variant="caption" color={Colors.textMuted}>
+                    Seu copiloto
+                  </Typography>
+                </Pressable>
+              </Animated.View>
+            </View>
+          </Animated.View>
+
+          <Animated.View entering={FadeInDown.delay(360).duration(500)} style={styles.shortcutStack}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.push('/orders')}
+              style={styles.ordersShortcut}
+            >
+              <View style={styles.ordersShortcutIcon}>
+                <Ionicons name="receipt-outline" size={24} color={Colors.primary} />
+              </View>
+              <View style={styles.ordersShortcutCopy}>
+                <Typography variant="title" weight="semibold">Meus pedidos</Typography>
+                <Typography variant="caption" color={Colors.textSecondary}>Acompanhe retirada, entrega e histórico</Typography>
+              </View>
+              <Ionicons name="chevron-forward" size={22} color={Colors.textMuted} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.push('/rewards')}
+              style={styles.ordersShortcut}
+            >
+              <View style={styles.ordersShortcutIcon}>
+                <Ionicons name="gift-outline" size={24} color={Colors.primary} />
+              </View>
+              <View style={styles.ordersShortcutCopy}>
+                <Typography variant="title" weight="semibold">Clube Meu Cesto</Typography>
+                <Typography variant="caption" color={Colors.textSecondary}>Pontos, benefícios e extrato</Typography>
+              </View>
+              <Ionicons name="chevron-forward" size={22} color={Colors.textMuted} />
+            </Pressable>
+          </Animated.View>
+
+          {smartInsight && !dismissedInsight && (
+            <Animated.View entering={FadeInDown.delay(400).duration(500)}>
+              <Typography variant="body" weight="bold" color={Colors.textPrimary} style={styles.sectionLabel}>
+                Insight inteligente
+              </Typography>
+
+              <Card style={styles.insightNotedCard}>
+                <View style={styles.notedHeader}>
+                  <View style={styles.notedIcon}>
+                    <Ionicons name="star" size={14} color="#080A09" />
+                  </View>
+                  <Typography variant="caption" weight="heavy" color={Colors.primary} style={{ letterSpacing: 0.5 }}>
+                    LUCA NOTOU
+                  </Typography>
+                </View>
+                <Typography variant="body" weight="bold" color={Colors.textPrimary} style={styles.notedTitle}>
+                  {smartInsight.message}
+                </Typography>
+                <Typography variant="body" color={Colors.textSecondary} style={styles.notedSubtitle}>
+                  Quer adicionar à próxima lista?
+                </Typography>
+                <View style={styles.notedActions}>
+                  <TouchableOpacity
+                    onPress={handleAddInsightItem}
+                    style={styles.notedAddBtn}
+                    activeOpacity={0.8}
+                  >
+                    <Typography variant="body" weight="bold" color="#080A09">
+                      + Adicionar
+                    </Typography>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => {
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      setDismissedInsight(true);
+                    }}
+                    style={styles.notedDismissBtn}
+                    activeOpacity={0.8}
+                  >
+                    <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                      Agora não
+                    </Typography>
+                  </TouchableOpacity>
+                </View>
+              </Card>
+            </Animated.View>
+          )}
         </View>
-      </Modal>
-    </View>
-  );
-}
-
-function CategoryCard({ icon, label, value }: any) {
-  return (
-    <View style={styles.catCard}>
-      <View style={styles.catIconWrapper}>
-        <Ionicons name={icon} size={22} color={TEXT_GRAY} />
-      </View>
-      <Text style={styles.catLabel}>{label}</Text>
-      <Text style={styles.catValue}>{value}</Text>
-    </View>
-  );
-}
-
-function ListItem({
-  name,
-  price,
-  quantity,
-  color = '#CBD5E1',
-}: Pick<ShoppingListItem, 'name' | 'price' | 'quantity' | 'color'>) {
-  const amount = getItemTotal({ price, quantity });
-  const quantityValue = getQuantity(quantity);
-
-  return (
-    <View style={styles.listItem}>
-      <View style={styles.listItemLeft}>
-        <View style={[styles.statusDot, { backgroundColor: color }]} />
-        <View style={styles.listItemText}>
-          <Text style={styles.itemName}>{name || 'Item'}</Text>
-          {quantityValue > 1 ? (
-            <Text style={styles.itemMeta}>{quantityValue} un.</Text>
-          ) : null}
-        </View>
-      </View>
-      <Text style={styles.itemPrice}>{amount > 0 ? formatCurrency(amount) : '--'}</Text>
+      </ScrollView>
     </View>
   );
 }
@@ -608,337 +749,220 @@ function ListItem({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: PRIMARY_GREEN,
+    backgroundColor: Colors.background,
   },
   scrollContent: {
-    flexGrow: 1,
+    paddingBottom: 130,
   },
   header: {
-    backgroundColor: PRIMARY_GREEN,
-    paddingHorizontal: 20,
-    paddingTop: STATUS_BAR_HEIGHT + 10,
-    paddingBottom: 35,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
+    paddingHorizontal: Spacing.xl,
+    paddingTop: STATUS_BAR_HEIGHT + Spacing.sm,
+    paddingBottom: Spacing.sm,
   },
   headerTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 25,
+    marginBottom: Spacing.md,
   },
-  greeting: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.8)',
-    fontWeight: '500',
+  menuButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: Colors.surface,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-  userName: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: '#fff',
+  headerTitle: {
+    marginBottom: 2,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
   },
   notificationCircle: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: Colors.surface,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  activeDot: {
-    position: 'absolute',
-    top: 10,
-    right: 10,
-    width: 8,
-    height: 8,
-    backgroundColor: '#FF5252',
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: PRIMARY_GREEN,
-  },
-  mainCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
-    borderRadius: 24,
-    padding: 20,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  mainCardLabel: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 13,
-    fontWeight: '600',
-    marginBottom: 5,
-  },
-  mainCardAmount: {
-    color: '#fff',
-    fontSize: 34,
-    fontWeight: '900',
-    marginBottom: 5,
-  },
-  mainCardSubtitle: {
-    color: 'rgba(255, 255, 255, 0.8)',
-    fontSize: 12,
-    fontWeight: '500',
+    borderColor: Colors.border,
   },
   mainContent: {
-    flex: 1,
-    paddingHorizontal: 20,
-    paddingTop: 25,
-    paddingBottom: 100,
-    backgroundColor: BG_LIGHT,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    minHeight: 600,
+    paddingHorizontal: Spacing.xl,
+    gap: Spacing.xl,
   },
-  categoriesRow: {
+  spendingCard: {
+    padding: Spacing.xl,
+    borderColor: Colors.border,
+    borderWidth: 1,
+  },
+  spendingHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 30,
-  },
-  catCard: {
-    width: (width - 60) / 3,
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 12,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 2,
+    marginBottom: Spacing.xs,
   },
-  catIconWrapper: {
-    marginBottom: 8,
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
+  trendLabel: {
+    backgroundColor: 'rgba(183, 255, 0, 0.1)',
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 2,
+    borderRadius: Radius.sm,
   },
-  catLabel: {
-    fontSize: 10,
-    color: TEXT_GRAY,
-    fontWeight: '600',
-    marginBottom: 4,
-    textAlign: 'center',
+  spendingAmount: {
+    marginBottom: Spacing.xs,
   },
-  catValue: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: TEXT_DARK,
+  spendingSubtitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.lg,
+  },
+  miniChartContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    height: 35,
+    marginTop: Spacing.sm,
+  },
+  miniChartBar: {
+    width: 14,
+    borderRadius: 4,
   },
   sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 15,
+    marginBottom: Spacing.sm,
   },
-  sectionTitle: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#94A3B8',
-    letterSpacing: 1,
-  },
-  seeAll: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: PRIMARY_GREEN,
-  },
-  listContainer: {
-    gap: 10,
-    marginBottom: 25,
-  },
-  listItem: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.02,
-    shadowRadius: 5,
-    elevation: 1,
-  },
-  listItemLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  listItemText: {
-    flex: 1,
-  },
-  statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    marginRight: 12,
-  },
-  itemName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: TEXT_DARK,
-  },
-  itemMeta: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: '800',
-    marginTop: 2,
-  },
-  itemPrice: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: TEXT_GRAY,
-  },
-  emptyBox: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 30,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#F1F5F9',
-    borderStyle: 'dashed',
-  },
-  emptyText: {
-    color: '#94A3B8',
-    fontSize: 14,
-    fontWeight: '600',
-    marginTop: 10,
-    textAlign: 'center',
-  },
-  lucaBtn: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 18,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: '#D1FAE5',
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 2,
-  },
-  lucaBtnLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-  },
-  lucaIconBg: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#DCFCE7',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  lucaBtnTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: TEXT_DARK,
-  },
-  lucaBtnSub: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    fontWeight: '500',
-    marginTop: 2,
-  },
-  modalOverlay: {
-    flex: 1,
-    justifyContent: 'flex-start',
-    paddingHorizontal: 18,
-    paddingTop: STATUS_BAR_HEIGHT + 16,
-  },
-  modalBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(15, 23, 42, 0.28)',
-  },
-  notificationPanel: {
-    width: '100%',
-    maxWidth: 520,
-    alignSelf: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 18,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.12,
-    shadowRadius: 24,
-    elevation: 8,
-  },
-  notificationHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  notificationTitle: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: TEXT_DARK,
-  },
-  notificationSubtitle: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  closeButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: BG_LIGHT,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  notificationList: {
-    gap: 12,
-    paddingBottom: 2,
-  },
-  notificationItem: {
-    flexDirection: 'row',
-    gap: 12,
-    borderRadius: 18,
-    padding: 14,
-    backgroundColor: BG_LIGHT,
+  nextPurchaseCard: {
+    borderColor: Colors.border,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    gap: Spacing.md,
   },
-  notificationIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  notificationBody: {
-    flex: 1,
-  },
-  notificationItemTitle: {
-    fontSize: 14,
-    fontWeight: '900',
-    color: TEXT_DARK,
-  },
-  notificationDescription: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    lineHeight: 17,
-    fontWeight: '600',
-    marginTop: 4,
-  },
-  notificationAction: {
+  nextPurchaseHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    alignSelf: 'flex-start',
-    marginTop: 10,
-    gap: 2,
+    gap: Spacing.md,
   },
-  notificationActionText: {
-    fontSize: 12,
-    color: PRIMARY_GREEN,
-    fontWeight: '900',
+  purchaseIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: Radius.sm,
+    backgroundColor: 'rgba(183, 255, 0, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  percentRow: {
+    marginTop: -Spacing.xs,
+  },
+  continueButton: {
+    backgroundColor: Colors.primary,
+    height: 52,
+    borderRadius: Radius.md,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sectionLabel: {
+    marginBottom: Spacing.md,
+  },
+  quickActionsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.md,
+  },
+  shortcutStack: {
+    gap: Spacing.md,
+  },
+  ordersShortcut: {
+    minHeight: 80,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    padding: Spacing.lg,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.xl,
+  },
+  ordersShortcutIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: Radius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(183, 255, 0, 0.08)',
+  },
+  ordersShortcutCopy: {
+    flex: 1,
+  },
+  gridCell: {
+    width: (width - 48 - Spacing.md) / 2,
+    backgroundColor: Colors.surface,
+    borderColor: Colors.border,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+  },
+  gridPressable: {
+    padding: Spacing.lg,
+    gap: Spacing.xs,
+  },
+  gridIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(183, 255, 0, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Spacing.xs,
+  },
+  insightNotedCard: {
+    backgroundColor: '#111A0B',
+    borderColor: Colors.primary,
+    borderWidth: 1,
+    gap: Spacing.sm,
+    padding: Spacing.xl,
+  },
+  notedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  notedIcon: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: Colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  notedTitle: {
+    marginTop: Spacing.xs,
+  },
+  notedSubtitle: {
+    marginBottom: Spacing.sm,
+  },
+  notedActions: {
+    flexDirection: 'row',
+    gap: Spacing.md,
+  },
+  notedAddBtn: {
+    backgroundColor: Colors.primary,
+    paddingHorizontal: Spacing.xl,
+    paddingVertical: Spacing.md,
+    borderRadius: Radius.md,
+  },
+  notedDismissBtn: {
+    backgroundColor: Colors.surfaceElevated,
+    paddingHorizontal: Spacing.xl,
+    paddingVertical: Spacing.md,
+    borderRadius: Radius.md,
+    borderColor: Colors.border,
+    borderWidth: 1,
   },
 });

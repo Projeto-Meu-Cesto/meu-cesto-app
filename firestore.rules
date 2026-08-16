@@ -1,33 +1,152 @@
-rules_version='2'
+rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isSignedIn() {
+    function signedIn() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
+    function owner(userId) {
+      return signedIn() && request.auth.uid == userId;
     }
 
-    match /users/{userId}/{document=**} {
-      allow read, write: if isOwner(userId);
+    function validOrderStatus(status) {
+      return status in [
+        'rascunho', 'aguardando_pagamento', 'recusado', 'confirmado',
+        'em_preparo', 'pronto_retirada', 'em_entrega', 'concluido',
+        'cancelado', 'estornado'
+      ];
+    }
+
+    function validTransition(before, after) {
+      return before == after
+        || (before == 'rascunho' && after == 'aguardando_pagamento')
+        || (before == 'aguardando_pagamento' && after in ['confirmado', 'recusado', 'cancelado'])
+        || (before == 'confirmado' && after in ['em_preparo', 'cancelado'])
+        || (before == 'em_preparo' && after in ['pronto_retirada', 'em_entrega'])
+        || (before in ['pronto_retirada', 'em_entrega'] && after == 'concluido')
+        || (before == 'concluido' && after == 'estornado');
+    }
+
+    function validOrder(userId, data) {
+      return data.keys().hasAll([
+          'id', 'uid', 'marketId', 'status', 'fulfillment', 'payment',
+          'items', 'totals', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == userId
+        && data.id is string
+        && data.marketId is string
+        && validOrderStatus(data.status)
+        && data.items is list
+        && data.items.size() > 0
+        && data.items.size() <= 100
+        && data.totals.total is number
+        && data.totals.total >= 0
+        && data.totals.total <= 100000;
+    }
+
+    match /users/{userId} {
+      allow read, create, update: if owner(userId);
+      allow delete: if owner(userId);
+
+      match /shopping_list/{itemId} {
+        allow read, write: if owner(userId);
+      }
+
+      match /purchases/{purchaseId} {
+        allow read, write: if owner(userId);
+      }
+
+      match /luca_chats/{chatId} {
+        allow read, write: if owner(userId);
+
+        match /messages/{messageId} {
+          allow read, write: if owner(userId);
+        }
+      }
+
+      match /orders/{orderId} {
+        allow read: if owner(userId);
+        allow create: if owner(userId)
+          && request.resource.data.id == orderId
+          && validOrder(userId, request.resource.data);
+        allow update: if owner(userId)
+          && validOrder(userId, request.resource.data)
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.marketId == resource.data.marketId
+          && request.resource.data.items == resource.data.items
+          && request.resource.data.totals == resource.data.totals
+          && request.resource.data.fulfillment == resource.data.fulfillment
+          && request.resource.data.createdAt == resource.data.createdAt
+          && validTransition(resource.data.status, request.resource.data.status);
+        allow delete: if false;
+
+        match /events/{eventId} {
+          allow read: if owner(userId);
+          allow create: if owner(userId)
+            && request.resource.data.id == eventId
+            && validOrderStatus(request.resource.data.status);
+          allow update, delete: if false;
+        }
+      }
+
+      match /loyalty_ledger/{entryId} {
+        allow read: if owner(userId);
+        allow create: if owner(userId)
+          && request.resource.data.id == entryId
+          && request.resource.data.kind in ['earn', 'release', 'redeem', 'reverse']
+          && request.resource.data.status in ['pending', 'available']
+          && request.resource.data.points is int
+          && request.resource.data.points >= -1000000
+          && request.resource.data.points <= 1000000
+          && request.resource.data.sourceKey is string;
+        allow update, delete: if false;
+      }
+
+      match /loyalty_summary/{summaryId} {
+        allow read: if owner(userId);
+        allow create, update: if owner(userId)
+          && summaryId == 'current'
+          && request.resource.data.pending is int
+          && request.resource.data.available is int
+          && request.resource.data.pending >= 0
+          && request.resource.data.available >= 0;
+        allow delete: if false;
+      }
+
+      match /redemptions/{redemptionId} {
+        allow read: if owner(userId);
+        allow create: if owner(userId)
+          && request.resource.data.id == redemptionId
+          && request.resource.data.pointsCost is int
+          && request.resource.data.pointsCost > 0;
+        allow update, delete: if false;
+      }
+
+      match /finance_entries/{entryId} {
+        allow read: if owner(userId);
+        allow create: if owner(userId)
+          && request.resource.data.id == entryId
+          && request.resource.data.source in ['order', 'order_refund']
+          && request.resource.data.sourceKey is string
+          && request.resource.data.orderId is string
+          && request.resource.data.amount is number
+          && request.resource.data.amount >= -100000
+          && request.resource.data.amount <= 100000
+          && request.resource.data.items is list
+          && request.resource.data.items.size() <= 100;
+        allow update, delete: if false;
+      }
     }
 
     match /dashboards/{userId} {
-      allow read, write: if isOwner(userId);
+      allow read, write: if owner(userId);
     }
 
-    // Cache de produtos (Open Food Facts) — leitura pública para autenticados,
-    // escrita permitida apenas para usuários autenticados com campos válidos.
     match /product_cache/{barcode} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn()
-        && request.resource.data.keys().hasOnly([
-          'barcode', 'name', 'name_lower', 'brand', 'quantity', 'image_url',
-          'category', 'avg_price', 'source', 'cached_at',
-          'gtin', 'description', 'thumbnail', 'brand_name'
-        ]);
+      allow read: if signedIn();
+      allow write: if false;
     }
 
     match /{document=**} {

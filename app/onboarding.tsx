@@ -1,137 +1,212 @@
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
-import {
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-  Pressable,
-  Dimensions,
-} from 'react-native';
-import Animated, { 
-  FadeInDown, 
-  FadeInUp,
-  Layout
-} from 'react-native-reanimated';
+import { StyleSheet, View, StatusBar, Dimensions, Pressable } from 'react-native';
+import { useRouter } from 'expo-router';
+import Animated, { FadeIn, FadeOut, SlideInRight, SlideOutLeft } from 'react-native-reanimated';
+import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
+
+import { Colors, Spacing, Radius } from '../constants/theme';
+import { Typography } from '../components/ui/Typography';
+import { Card } from '../components/ui/Card';
+import { Button } from '../components/ui/Button';
+import { ProgressBar } from '../components/ui/ProgressBar';
 
 const { width } = Dimensions.get('window');
 
-const PRIMARY_GREEN = '#00C853';
-const LIGHT_GREEN = '#E8F5E9';
-const TEXT_GRAY = '#757575';
-const BORDER_GRAY = '#E0E0E0';
-
-const OPTIONS = [
-  { id: 'save', title: 'Economizar Dinheiro', icon: 'cash-outline' },
-  { id: 'organize', title: 'Organizar compras', icon: 'cart-outline' },
-  { id: 'track', title: 'Rastrear Gastos', icon: 'stats-chart-outline' },
-  { id: 'budget', title: 'Planejar Orçamento', icon: 'calendar-outline' },
-  { id: 'ai', title: 'Analisar Preços com IA', icon: 'bulb-outline' },
-  { id: 'shared', title: 'Listas Compartilhadas', icon: 'people-outline' },
+const QUESTIONS = [
+  {
+    id: 'frequency',
+    title: 'Como você faz compras?',
+    subtitle: 'Nos ajude a entender a sua rotina de mercado.',
+    options: [
+      { id: 'weekly', label: 'Toda semana', icon: 'calendar-outline' },
+      { id: 'biweekly', label: 'A cada 15 dias', icon: 'repeat-outline' },
+      { id: 'monthly', label: 'Uma vez por mês', icon: 'wallet-outline' },
+      { id: 'needed', label: 'Quando preciso', icon: 'cart-outline' },
+    ],
+    multiple: false,
+  },
+  {
+    id: 'improve',
+    title: 'O que quer melhorar?',
+    subtitle: 'Selecione todos os objetivos que fazem sentido.',
+    options: [
+      { id: 'spend_less', label: 'Gastar menos', icon: 'trending-down-outline' },
+      { id: 'organize', label: 'Organizar minhas compras', icon: 'checkbox-outline' },
+      { id: 'best_prices', label: 'Encontrar melhores preços', icon: 'search-outline' },
+      { id: 'understand', label: 'Entender meus gastos', icon: 'pie-chart-outline' },
+    ],
+    multiple: true,
+  },
+  {
+    id: 'goal',
+    title: 'Qual seu maior objetivo?',
+    subtitle: 'Esse será o foco principal do Luca, seu copiloto.',
+    options: [
+      { id: 'economize', label: 'ECONOMIZAR', icon: 'cash-outline' },
+      { id: 'organize_all', label: 'ORGANIZAR', icon: 'list-outline' },
+      { id: 'control', label: 'CONTROLAR', icon: 'shield-checkmark-outline' },
+    ],
+    multiple: false,
+  },
 ];
 
 export default function OnboardingScreen() {
-  const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
   const router = useRouter();
+  const [currentStep, setCurrentStep] = useState(0);
+  const [answers, setAnswers] = useState<Record<string, string[]>>({
+    frequency: [],
+    improve: [],
+    goal: [],
+  });
 
-  const toggleOption = (id: string) => {
-    if (selectedOptions.includes(id)) {
-      setSelectedOptions(selectedOptions.filter(item => item !== id));
+  const currentQuestion = QUESTIONS[currentStep];
+
+  const handleSelectOption = (optionId: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const questionId = currentQuestion.id;
+    const isMultiple = currentQuestion.multiple;
+
+    if (isMultiple) {
+      const currentAnswers = answers[questionId];
+      if (currentAnswers.includes(optionId)) {
+        setAnswers({
+          ...answers,
+          [questionId]: currentAnswers.filter((id) => id !== optionId),
+        });
+      } else {
+        setAnswers({
+          ...answers,
+          [questionId]: [...currentAnswers, optionId],
+        });
+      }
     } else {
-      setSelectedOptions([...selectedOptions, id]);
+      setAnswers({
+        ...answers,
+        [questionId]: [optionId],
+      });
     }
   };
 
-  const handleFinish = () => {
-    router.replace('/(tabs)/home');
+  const handleNext = () => {
+    if (currentStep < QUESTIONS.length - 1) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setCurrentStep(currentStep + 1);
+    } else {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      router.replace('/(tabs)/home');
+    }
   };
+
+  const handleBack = () => {
+    if (currentStep > 0) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setCurrentStep(currentStep - 1);
+    }
+  };
+
+  const hasAnswer = answers[currentQuestion.id].length > 0;
+  const progress = (currentStep + 1) / QUESTIONS.length;
 
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
       
+      {/* Top Header */}
       <View style={styles.header}>
-        <View style={styles.glow} />
-        <Animated.View entering={FadeInUp.delay(200).duration(800)} style={styles.headerIcons}>
-          <View style={styles.iconBox}>
-            <Ionicons name="cart" size={40} color={PRIMARY_GREEN} />
-          </View>
-          <View style={styles.iconDivider} />
-          <View style={styles.iconBox}>
-            <Ionicons name="card" size={40} color={PRIMARY_GREEN} />
-          </View>
-        </Animated.View>
+        {currentStep > 0 ? (
+          <Button
+            variant="ghost"
+            label=""
+            leftIcon={<Ionicons name="arrow-back" size={24} color={Colors.textPrimary} />}
+            onPress={handleBack}
+            style={styles.backButton}
+          />
+        ) : (
+          <View style={styles.backPlaceholder} />
+        )}
+        <Typography variant="body" weight="semibold" color={Colors.textSecondary}>
+          Passo {currentStep + 1} de {QUESTIONS.length}
+        </Typography>
+        <View style={styles.backPlaceholder} />
       </View>
 
-      <View style={styles.content}>
-        <ScrollView 
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-        >
-          <Animated.View entering={FadeInDown.delay(400).duration(800)} style={styles.titleContainer}>
-            <Text style={styles.title}>Controle suas compras e economize</Text>
-            <Text style={styles.subtitle}>
-              Organize suas listas, acompanhe seus gastos e economize todo mês com inteligência.
-            </Text>
-          </Animated.View>
+      {/* Progress Bar */}
+      <View style={styles.progressContainer}>
+        <ProgressBar progress={progress} color={Colors.primary} height={4} />
+      </View>
 
-          <View style={styles.optionsContainer}>
-            {OPTIONS.map((option, index) => {
-              const isSelected = selectedOptions.includes(option.id);
-              return (
-                <Animated.View 
-                  key={option.id}
-                  entering={FadeInDown.delay(500 + (index * 100)).duration(600)}
-                  layout={Layout.springify()}
+      {/* Slide Transition Area */}
+      <Animated.View 
+        key={currentStep}
+        entering={SlideInRight.duration(300)}
+        exiting={SlideOutLeft.duration(300)}
+        style={styles.slide}
+      >
+        <View style={styles.titleWrap}>
+          <Typography variant="heading" weight="bold" color={Colors.textPrimary} style={styles.title}>
+            {currentQuestion.title}
+          </Typography>
+          <Typography variant="body" color={Colors.textSecondary} style={styles.subtitle}>
+            {currentQuestion.subtitle}
+          </Typography>
+        </View>
+
+        <View style={styles.optionsWrap}>
+          {currentQuestion.options.map((option) => {
+            const isSelected = answers[currentQuestion.id].includes(option.id);
+            return (
+              <Card
+                key={option.id}
+                elevated={isSelected}
+                style={[
+                  styles.optionCard,
+                  isSelected && styles.optionCardSelected,
+                ]}
+              >
+                <Pressable
+                  style={styles.optionPressable}
+                  onPress={() => handleSelectOption(option.id)}
                 >
-                  <TouchableOpacity
-                    onPress={() => toggleOption(option.id)}
-                    style={[
-                      styles.optionCard,
-                      isSelected && styles.optionCardSelected
-                    ]}
+                  <View style={styles.optionIconContainer}>
+                    <Ionicons 
+                      name={option.icon as any} 
+                      size={24} 
+                      color={isSelected ? Colors.background : Colors.textSecondary} 
+                    />
+                  </View>
+                  <Typography 
+                    variant="body" 
+                    weight={isSelected ? 'bold' : 'regular'}
+                    color={isSelected ? Colors.background : Colors.textPrimary}
+                    style={styles.optionLabel}
                   >
+                    {option.label}
+                  </Typography>
+                  {currentQuestion.multiple && (
                     <View style={[
                       styles.checkbox,
                       isSelected && styles.checkboxSelected
                     ]}>
-                      {isSelected && <Ionicons name="checkmark" size={16} color="#fff" />}
+                      {isSelected && <Ionicons name="checkmark" size={14} color={Colors.primary} />}
                     </View>
-                    <Text style={[
-                      styles.optionText,
-                      isSelected && styles.optionTextSelected
-                    ]}>
-                      {option.title}
-                    </Text>
-                    <Ionicons 
-                      name={option.icon as any} 
-                      size={20} 
-                      color={isSelected ? PRIMARY_GREEN : TEXT_GRAY} 
-                      style={styles.optionIcon}
-                    />
-                  </TouchableOpacity>
-                </Animated.View>
-              );
-            })}
-          </View>
+                  )}
+                </Pressable>
+              </Card>
+            );
+          })}
+        </View>
+      </Animated.View>
 
-          <Animated.View entering={FadeInDown.delay(1200).duration(800)}>
-            <Pressable
-              onPress={handleFinish}
-              disabled={selectedOptions.length === 0}
-              style={({ pressed }) => [
-                styles.button,
-                selectedOptions.length === 0 && styles.buttonDisabled,
-                { transform: [{ scale: pressed ? 0.98 : 1 }] }
-              ]}
-            >
-              <Text style={styles.buttonText}>Começar agora!</Text>
-            </Pressable>
-          </Animated.View>
-        </ScrollView>
+      {/* Footer Navigation */}
+      <View style={styles.footer}>
+        <Button
+          variant="primary"
+          label={currentStep === QUESTIONS.length - 1 ? 'Montar meu Cesto' : 'Continuar'}
+          disabled={!hasAnswer}
+          onPress={handleNext}
+          style={styles.submitButton}
+        />
       </View>
     </View>
   );
@@ -140,140 +215,83 @@ export default function OnboardingScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: Colors.background,
+    justifyContent: 'space-between',
+    paddingTop: StatusBar.currentHeight ? StatusBar.currentHeight + Spacing.lg : 60,
   },
   header: {
-    height: 220,
-    backgroundColor: '#00332a',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderBottomLeftRadius: 40,
-    borderBottomRightRadius: 40,
-    overflow: 'hidden',
-  },
-  glow: {
-    position: 'absolute',
-    width: width * 0.8,
-    height: width * 0.8,
-    borderRadius: (width * 0.8) / 2,
-    backgroundColor: PRIMARY_GREEN,
-    opacity: 0.15,
-    transform: [{ scaleX: 1.8 }],
-  },
-  headerIcons: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.xl,
   },
-  iconBox: {
-    width: 80,
-    height: 80,
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 8,
+  backButton: {
+    padding: 0,
+    width: 44,
+    height: 44,
   },
-  iconDivider: {
-    width: 40,
-    height: 4,
-    backgroundColor: '#00B0FF',
-    marginHorizontal: 10,
-    borderRadius: 2,
+  backPlaceholder: {
+    width: 44,
   },
-  content: {
+  progressContainer: {
+    paddingHorizontal: Spacing.xl,
+    marginTop: Spacing.md,
+  },
+  slide: {
     flex: 1,
-    marginTop: -40,
+    paddingHorizontal: Spacing.xl,
+    justifyContent: 'center',
   },
-  scrollContent: {
-    paddingHorizontal: 25,
-    paddingTop: 60,
-    paddingBottom: 40,
-  },
-  titleContainer: {
-    alignItems: 'center',
-    marginBottom: 40,
+  titleWrap: {
+    marginBottom: Spacing.xxl,
   },
   title: {
-    fontSize: 24,
-    fontWeight: '900',
-    color: '#333',
-    textAlign: 'center',
-    marginBottom: 12,
+    marginBottom: Spacing.sm,
   },
   subtitle: {
-    fontSize: 15,
-    color: TEXT_GRAY,
-    textAlign: 'center',
     lineHeight: 22,
-    paddingHorizontal: 10,
   },
-  optionsContainer: {
-    marginBottom: 30,
+  optionsWrap: {
+    gap: Spacing.md,
   },
   optionCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderWidth: 1.5,
-    borderColor: BORDER_GRAY,
-    borderRadius: 20,
-    padding: 16,
-    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: 0,
   },
   optionCardSelected: {
-    borderColor: PRIMARY_GREEN,
-    backgroundColor: LIGHT_GREEN,
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  optionPressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: Spacing.lg,
+  },
+  optionIconContainer: {
+    marginRight: Spacing.md,
+  },
+  optionLabel: {
+    flex: 1,
   },
   checkbox: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: BORDER_GRAY,
+    width: 20,
+    height: 20,
+    borderRadius: Radius.sm,
+    borderWidth: 1.5,
+    borderColor: Colors.textSecondary,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 15,
   },
   checkboxSelected: {
-    backgroundColor: PRIMARY_GREEN,
-    borderColor: PRIMARY_GREEN,
+    backgroundColor: Colors.background,
+    borderColor: Colors.background,
   },
-  optionText: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: '600',
-    color: TEXT_GRAY,
+  footer: {
+    paddingHorizontal: Spacing.xl,
+    paddingBottom: Spacing.xxxxl,
   },
-  optionTextSelected: {
-    color: PRIMARY_GREEN,
-  },
-  optionIcon: {
-    marginLeft: 10,
-  },
-  button: {
-    backgroundColor: PRIMARY_GREEN,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-  buttonDisabled: {
-    backgroundColor: '#CCC',
-    shadowOpacity: 0,
-    elevation: 0,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
+  submitButton: {
+    width: '100%',
   },
 });

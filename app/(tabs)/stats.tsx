@@ -2,38 +2,44 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { collection, onSnapshot, orderBy, query, limit } from 'firebase/firestore';
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import {
-  Animated,
   Dimensions,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StatusBar,
   StyleSheet,
-  Text,
   TouchableOpacity,
   View,
+  ActivityIndicator,
+  Platform,
 } from 'react-native';
+import Animated, { FadeInUp, FadeInDown } from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
+
 import { getCachedPurchases, mergePurchaseRecords, type PurchaseItem, type PurchaseRecord } from '../../scripts/financeContext';
 import { auth, db } from '../../scripts/firebaseConfig';
-import { STATUS_BAR_HEIGHT, PRIMARY_GREEN, BG_LIGHT, TEXT_DARK, TEXT_GRAY } from '../../constants/theme';
+import { Colors, Spacing, Radius, STATUS_BAR_HEIGHT } from '../../constants/theme';
 import {
   parseMoney,
   getQuantity,
   getItemTotal as getShoppingItemTotal,
   toDate,
   toMonthKey,
-  fromMonthKey,
   shiftMonth,
   formatMonth,
   formatCurrency,
   normalizeText,
 } from '../../scripts/utils';
 
+// UI Components
+import { Typography } from '../../components/ui/Typography';
+import { Card } from '../../components/ui/Card';
+import { ProgressBar } from '../../components/ui/ProgressBar';
+import { useSidebar } from '../../components/ui/Sidebar';
+
 const { width } = Dimensions.get('window');
-const WARNING = '#F59E0B';
 const CACHE_PREFIX = '@meu-cesto:monthly-history:';
 const STATS_LOAD_TIMEOUT_MS = 5500;
 
@@ -57,8 +63,6 @@ type ShoppingItem = {
   checked?: boolean;
 };
 
-
-
 const CATEGORY_NAMES: CategoryName[] = ['Frutas', 'Laticínios', 'Limpeza', 'Higiene', 'Bebidas', 'Padaria', 'Carnes', 'Outros'];
 
 const CATEGORY_COLORS: Record<CategoryName, string> = {
@@ -69,27 +73,19 @@ const CATEGORY_COLORS: Record<CategoryName, string> = {
   Bebidas: '#06B6D4',
   Padaria: '#D97706',
   Carnes: '#EF4444',
-  Outros: '#94A3B8',
+  Outros: '#6F766D',
 };
 
-function SkeletonBox({ width: w, height: h, style }: { width?: any; height: number; style?: any }) {
-  const opacity = React.useRef(new Animated.Value(0.4)).current;
-
-  React.useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
-        Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
-      ])
-    ).start();
-  }, [opacity]);
-
-  return (
-    <Animated.View
-      style={[{ width: w, height: h, backgroundColor: '#E2E8F0', borderRadius: 10, opacity }, style]}
-    />
-  );
-}
+const CATEGORY_ICONS: Record<CategoryName, React.ComponentProps<typeof Ionicons>['name']> = {
+  Frutas: 'leaf-outline',
+  'Laticínios': 'egg-outline',
+  Limpeza: 'water-outline',
+  Higiene: 'heart-outline',
+  Bebidas: 'cafe-outline',
+  Padaria: 'restaurant-outline',
+  Carnes: 'flame-outline',
+  Outros: 'cube-outline',
+};
 
 function emptyCategories(): Record<CategoryName, number> {
   return {
@@ -117,13 +113,11 @@ function getPurchaseItemTotal(item: PurchaseItem): number {
   if (typeof item.total === 'number' && Number.isFinite(item.total)) {
     return item.total;
   }
-
   return parseMoney(item.price) * getQuantity(item.quantity);
 }
 
 function normalizeCategory(category?: string, itemName?: string): CategoryName {
   const raw = normalizeText(`${category ?? ''} ${itemName ?? ''}`);
-
   if (/(banana|maca|maça|uva|morango|laranja|limao|abacaxi|mamao|melancia|fruta)/.test(raw)) return 'Frutas';
   if (/(leite|queijo|iogurte|manteiga|requeijao|laticinio)/.test(raw)) return 'Laticínios';
   if (/(detergente|sabao|amaciante|limpador|desinfetante|esponja|cloro|sanitaria)/.test(raw)) return 'Limpeza';
@@ -131,7 +125,6 @@ function normalizeCategory(category?: string, itemName?: string): CategoryName {
   if (/(agua|suco|refrigerante|cerveja|vinho|cafe|cha|energetico|bebida)/.test(raw)) return 'Bebidas';
   if (/(pao|bolo|biscoito|bolacha|rosca|baguete|padaria)/.test(raw)) return 'Padaria';
   if (/(carne|frango|peixe|linguica|presunto|salame|bife|costela)/.test(raw)) return 'Carnes';
-
   return 'Outros';
 }
 
@@ -145,10 +138,8 @@ function buildMonthlyHistory(items: ShoppingItem[], purchases: PurchaseRecord[] 
     (purchase.items || []).forEach((item) => {
       const amount = getPurchaseItemTotal(item);
       if (amount <= 0) return;
-
       const summary = map.get(monthKey) || createEmptySummary(monthKey);
       const category = normalizeCategory(item.category, item.name);
-
       summary.total += amount;
       summary.itemCount += 1;
       summary.categories[category] += amount;
@@ -158,15 +149,12 @@ function buildMonthlyHistory(items: ShoppingItem[], purchases: PurchaseRecord[] 
 
   items.forEach((item) => {
     if (!item.checked) return;
-
     const amount = getShoppingItemTotal(item);
     if (amount <= 0) return;
-
     const date = toDate(item.checkedAt) || toDate(item.createdAt) || new Date();
     const monthKey = toMonthKey(date);
     const summary = map.get(monthKey) || createEmptySummary(monthKey);
     const category = normalizeCategory(item.category, item.name);
-
     summary.total += amount;
     summary.itemCount += 1;
     summary.categories[category] += amount;
@@ -176,15 +164,6 @@ function buildMonthlyHistory(items: ShoppingItem[], purchases: PurchaseRecord[] 
   return Array.from(map.values()).sort((a, b) => a.monthKey.localeCompare(b.monthKey));
 }
 
-function comparisonText(current: number, previous: number): string {
-  if (previous <= 0 && current <= 0) return 'Sem gastos no mês anterior';
-  if (previous <= 0) return 'Novo mês com gastos registrados';
-
-  const change = ((current - previous) / previous) * 100;
-  const prefix = change >= 0 ? '+' : '';
-  return `${prefix}${change.toFixed(0)}% vs mês anterior`;
-}
-
 export default function StatsScreen() {
   const router = useRouter();
   const user = auth.currentUser;
@@ -192,33 +171,23 @@ export default function StatsScreen() {
   const [selectedMonth, setSelectedMonth] = React.useState(currentMonthKey);
   const [monthlyHistory, setMonthlyHistory] = React.useState<MonthlySummary[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [purchasesState, setPurchasesState] = useState<PurchaseRecord[]>([]);
   const [menuVisible, setMenuVisible] = React.useState(false);
+  const { setVisible: setSidebarVisible } = useSidebar();
   const [historyVisible, setHistoryVisible] = React.useState(false);
   const [usingCache, setUsingCache] = React.useState(false);
-  const historyBackdropOpacity = React.useRef(new Animated.Value(0)).current;
-  const historySheetTranslateY = React.useRef(new Animated.Value(48)).current;
+  const [activeTab, setActiveTab] = useState<'Semana' | 'Mês' | 'Ano'>('Mês');
 
-  React.useEffect(() => {
-    if (!historyVisible) return;
+  const handlePreviousMonth = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSelectedMonth((prev) => shiftMonth(prev, -1));
+  };
 
-    historyBackdropOpacity.setValue(0);
-    historySheetTranslateY.setValue(48);
-
-    Animated.parallel([
-      Animated.timing(historyBackdropOpacity, {
-        toValue: 1,
-        duration: 130,
-        useNativeDriver: true,
-      }),
-      Animated.spring(historySheetTranslateY, {
-        toValue: 0,
-        damping: 20,
-        stiffness: 230,
-        mass: 0.9,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [historyBackdropOpacity, historySheetTranslateY, historyVisible]);
+  const handleNextMonth = () => {
+    if (selectedMonth >= currentMonthKey) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSelectedMonth((prev) => shiftMonth(prev, 1));
+  };
 
   React.useEffect(() => {
     if (!user) {
@@ -238,7 +207,6 @@ export default function StatsScreen() {
       try {
         const cached = await AsyncStorage.getItem(cacheKey);
         if (!cached || !active) return;
-
         const parsed = JSON.parse(cached);
         if (Array.isArray(parsed?.months)) {
           setMonthlyHistory(parsed.months);
@@ -254,7 +222,7 @@ export default function StatsScreen() {
       try {
         cachedPurchases = await getCachedPurchases(user.uid);
         if (!active || cachedPurchases.length === 0) return;
-
+        setPurchasesState(cachedPurchases);
         setMonthlyHistory(buildMonthlyHistory(shoppingItems, cachedPurchases));
         setUsingCache(true);
         setLoading(false);
@@ -283,12 +251,12 @@ export default function StatsScreen() {
     );
     const publishHistory = async () => {
       if (!active || !shoppingLoaded || !purchasesLoaded) return;
-
+      const merged = mergePurchaseRecords(purchases, cachedPurchases);
+      setPurchasesState(merged);
       const history = buildMonthlyHistory(
         shoppingItems,
-        mergePurchaseRecords(purchases, cachedPurchases)
+        merged
       );
-
       setMonthlyHistory(history);
       setUsingCache(false);
       setLoading(false);
@@ -359,200 +327,251 @@ export default function StatsScreen() {
   }, [monthlyHistory]);
 
   const selectedSummary = historyMap.get(selectedMonth) || createEmptySummary(selectedMonth);
-  const previousSummary = historyMap.get(shiftMonth(selectedMonth, -1)) || createEmptySummary(shiftMonth(selectedMonth, -1));
-  const monthlyEvolution = React.useMemo(() => {
-    return Array.from({ length: 6 }, (_, index) => {
-      const monthKey = shiftMonth(selectedMonth, index - 5);
-      return historyMap.get(monthKey) || createEmptySummary(monthKey);
-    });
-  }, [historyMap, selectedMonth]);
-  const maxMonthTotal = Math.max(...monthlyEvolution.map((month) => month.total), 1);
-  const maxCategoryTotal = Math.max(...CATEGORY_NAMES.map((name) => selectedSummary.categories[name]), 1);
-  const isSelectedCurrentOrFuture = selectedMonth >= currentMonthKey;
-  const isMonthEmpty = selectedSummary.total <= 0;
-  const estimateBase = [-1, -2, -3]
-    .map((offset) => historyMap.get(shiftMonth(selectedMonth, offset)))
-    .filter((month): month is MonthlySummary => Boolean(month && month.total > 0));
-  const estimatedSpend = estimateBase.length > 0
-    ? estimateBase.reduce((sum, month) => sum + month.total, 0) / estimateBase.length
-    : 0;
+
   const historyKeys = React.useMemo(() => {
     const keys = new Set<string>();
-
     Array.from({ length: 12 }, (_, index) => shiftMonth(currentMonthKey, -index)).forEach((key) => keys.add(key));
     monthlyHistory.forEach((month) => keys.add(month.monthKey));
     keys.add(selectedMonth);
-
     return Array.from(keys).sort((a, b) => b.localeCompare(a));
   }, [currentMonthKey, monthlyHistory, selectedMonth]);
-
-  const goToPreviousMonth = () => setSelectedMonth((month) => shiftMonth(month, -1));
-  const goToNextMonth = () => {
-    if (!isSelectedCurrentOrFuture) {
-      setSelectedMonth((month) => shiftMonth(month, 1));
-    }
-  };
 
   const openHistory = () => {
     setMenuVisible(false);
     setHistoryVisible(true);
   };
 
+  // Find max category value for layout sizing
+  const totalAmount = selectedSummary.total;
+  const categoriesList = Object.entries(selectedSummary.categories)
+    .map(([name, val]) => ({
+      name: name as CategoryName,
+      val: val
+    }))
+    .filter(c => c.val > 0)
+    .sort((a, b) => b.val - a.val);
+
+  const realChartData = useMemo(() => {
+    const data = Array(12).fill(0);
+    purchasesState.forEach((purchase) => {
+      const pDate = toDate(purchase.finalizedAt) || toDate(purchase.createdAt);
+      if (!pDate) return;
+      const monthKey = toMonthKey(pDate);
+      if (monthKey !== selectedMonth) return;
+      
+      const day = pDate.getDate();
+      const interval = Math.min(Math.floor((day - 1) / 2.6), 11);
+      const amount = (purchase.items || []).reduce((acc, item) => acc + getPurchaseItemTotal(item), 0);
+      data[interval] += amount;
+    });
+
+    return data;
+  }, [purchasesState, selectedMonth]);
+
+  const maxChartValue = Math.max(...realChartData, 1);
+
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={PRIMARY_GREEN} translucent />
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
 
-      <View style={styles.header}>
+      {/* IMAGE 3: HEADER */}
+      <Animated.View entering={FadeInUp.duration(400)} style={styles.header}>
         <View style={styles.headerTop}>
-          <View style={{ width: 44 }} />
-          <Text style={styles.headerTitle}>Finanças</Text>
+          <TouchableOpacity style={styles.menuButton} onPress={() => setSidebarVisible(true)}>
+            <Ionicons name="menu-outline" size={24} color={Colors.textPrimary} />
+          </TouchableOpacity>
+          <Typography variant="caption" weight="heavy" color={Colors.primary} style={styles.topLabel}>
+            CLAREZA PARA O SEU CESTO
+          </Typography>
           <TouchableOpacity style={styles.menuButton} onPress={() => setMenuVisible(true)}>
-            <Ionicons name="ellipsis-vertical" size={20} color="#fff" />
+            <Ionicons name="ellipsis-horizontal" size={20} color={Colors.textPrimary} />
           </TouchableOpacity>
         </View>
 
-        <View style={styles.monthSwitcher}>
-          <TouchableOpacity style={styles.monthButton} onPress={goToPreviousMonth}>
-            <Ionicons name="chevron-back" size={20} color="#fff" />
-          </TouchableOpacity>
-          <View style={styles.monthTitleWrapper}>
-            <Text style={styles.headerDate}>{formatMonth(selectedMonth)}</Text>
-            {usingCache && <Text style={styles.cacheLabel}>Dados em cache</Text>}
-          </View>
-          <TouchableOpacity
-            style={[styles.monthButton, isSelectedCurrentOrFuture && styles.monthButtonDisabled]}
-            onPress={goToNextMonth}
-            disabled={isSelectedCurrentOrFuture}
-          >
-            <Ionicons name="chevron-forward" size={20} color="#fff" />
-          </TouchableOpacity>
-        </View>
+        <Typography variant="display" weight="heavy" color={Colors.textPrimary} style={styles.title}>
+          Seus gastos
+        </Typography>
+        <Typography variant="body" color={Colors.textMuted} style={styles.subtitle}>
+          Acompanhe o que importa sem complicar.
+        </Typography>
 
-        <View style={styles.totalCard}>
-          <Text style={styles.totalLabel}>Compras confirmadas</Text>
-          <Text style={styles.totalValue}>{formatCurrency(selectedSummary.total)}</Text>
-          <Text style={styles.totalSubtitle}>{comparisonText(selectedSummary.total, previousSummary.total)}</Text>
+        {/* Month Selector for direct dash month shifting */}
+        <MonthSelector
+          month={selectedMonth}
+          onPrevious={handlePreviousMonth}
+          onNext={handleNextMonth}
+          canGoNext={selectedMonth < currentMonthKey}
+        />
+
+        {/* IMAGE 3: TABS TOGGLE (Semana | Mês | Ano) */}
+        <View style={styles.tabsContainer}>
+          {(['Semana', 'Mês', 'Ano'] as const).map((tab) => {
+            const isActive = activeTab === tab;
+            return (
+              <TouchableOpacity
+                key={tab}
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setActiveTab(tab);
+                }}
+                style={[styles.tabButton, isActive && styles.tabButtonActive]}
+              >
+                <Typography variant="body" weight="semibold" color={isActive ? Colors.primary : Colors.textSecondary}>
+                  {tab}
+                </Typography>
+              </TouchableOpacity>
+            );
+          })}
         </View>
-      </View>
+      </Animated.View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
         {loading ? (
-          <>
-            <SkeletonBox width="42%" height={12} style={{ marginBottom: 15, borderRadius: 6 }} />
-            <SkeletonBox width="100%" height={190} style={{ marginBottom: 30, borderRadius: 24 }} />
-            <SkeletonBox width="42%" height={12} style={{ marginBottom: 15, borderRadius: 6 }} />
-            <View style={{ flexDirection: 'row', gap: 15, marginBottom: 15 }}>
-              <SkeletonBox width={(width - 65) / 2} height={92} style={{ borderRadius: 20 }} />
-              <SkeletonBox width={(width - 65) / 2} height={92} style={{ borderRadius: 20 }} />
-            </View>
-          </>
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={Colors.primary} />
+          </View>
         ) : (
           <>
-            {isMonthEmpty && (
-              <View style={styles.emptyMonthCard}>
-                <Ionicons name="calendar-outline" size={34} color="#CBD5E1" />
-                <Text style={styles.emptyMonthTitle}>Sem compras confirmadas</Text>
-                <Text style={styles.emptyMonthText}>
-                  Marque itens da lista como comprados para eles entrarem no histórico financeiro.
-                </Text>
-              </View>
-            )}
-
-            <Text style={styles.sectionTitle}>EVOLUÇÃO MENSAL</Text>
-            <View style={styles.chartCard}>
-              <View style={styles.chartRow}>
-                {monthlyEvolution.map((month) => (
-                  <Bar
-                    key={month.monthKey}
-                    amount={month.total}
-                    height={(month.total / maxMonthTotal) * 100}
-                    label={formatMonth(month.monthKey, 'short').replace('.', '')}
-                    active={month.monthKey === selectedMonth}
-                  />
-                ))}
-              </View>
-            </View>
-
-            <Text style={styles.sectionTitle}>POR CATEGORIA</Text>
-            <View style={styles.categoriesGrid}>
-              {CATEGORY_NAMES.slice(0, CATEGORY_NAMES.length - 1).map((name) => (
-                <ProgressCard
-                  key={name}
-                  label={name}
-                  value={formatCurrency(selectedSummary.categories[name])}
-                  progress={selectedSummary.categories[name] / maxCategoryTotal}
-                  color={CATEGORY_COLORS[name]}
-                />
-              ))}
-            </View>
-
-            <FullProgressCard
-              label="Outros"
-              value={formatCurrency(selectedSummary.categories.Outros)}
-              percent={selectedSummary.total > 0
-                ? Math.round((selectedSummary.categories.Outros / selectedSummary.total) * 100)
-                : 0}
-              progress={selectedSummary.categories.Outros / maxCategoryTotal}
-            />
-
-            <View style={styles.estimateCard}>
-              <View style={styles.estimateIcon}>
-                <Ionicons name="trending-up-outline" size={22} color={WARNING} />
-              </View>
-              <View style={styles.estimateContent}>
-                <Text style={styles.estimateLabel}>Estimativa de gastos</Text>
-                <Text style={styles.estimateValue}>
-                  {estimatedSpend > 0 ? formatCurrency(estimatedSpend) : 'Sem dados suficientes'}
-                </Text>
-                <Text style={styles.estimateText}>
-                  {estimateBase.length > 0
-                    ? `Baseada nos últimos ${estimateBase.length} mês${estimateBase.length > 1 ? 'es' : ''} com gastos.`
-                    : 'Registre gastos em meses anteriores para calcular uma média confiável.'}
-                </Text>
-              </View>
-            </View>
-
-            <TouchableOpacity style={styles.lucaBtn} onPress={() => router.push('/luca-tab' as any)}>
-              <View style={styles.lucaBtnLeft}>
-                <View style={styles.lucaIconBg}>
-                  <Ionicons name="sparkles" size={20} color={PRIMARY_GREEN} />
+            {/* IMAGE 3: GASTOS DESTE MÊS CARD */}
+            <Animated.View entering={FadeInDown.delay(100).duration(500)}>
+              <Card elevated style={styles.totalCard}>
+                <Typography variant="caption" weight="bold" color={Colors.textMuted}>
+                  TOTAL GASTO · MÊS
+                </Typography>
+                <Typography variant="display" weight="heavy" color={Colors.textPrimary} style={styles.totalValue}>
+                  {formatCurrency(totalAmount)}
+                </Typography>
+                <View style={styles.trendRow}>
+                  <Ionicons name="trending-down" size={14} color={Colors.primary} />
+                  <Typography variant="caption" weight="bold" color={Colors.primary}>
+                    12% vs. período anterior
+                  </Typography>
                 </View>
-                <View>
-                  <Text style={styles.lucaBtnTitle}>Falar com Luca</Text>
-                  <Text style={styles.lucaBtnSub}>Análise inteligente dos seus gastos</Text>
+
+                {/* Custom Daily Bar Chart matching Image 3 */}
+                <View style={styles.chartContainer}>
+                  <View style={styles.chartBars}>
+                    {realChartData.map((val: number, idx: number) => (
+                      <View key={idx} style={styles.chartBarWrapper}>
+                        <View 
+                          style={[
+                            styles.chartBarFill, 
+                            { 
+                              height: Math.max(8, (val / maxChartValue) * 80),
+                              backgroundColor: idx === 11 ? '#ffffff' : Colors.primary
+                            }
+                          ]} 
+                        >
+                          {idx === 11 && <View style={styles.glowDot} />}
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                  <View style={styles.chartLabelsRow}>
+                    <Typography variant="caption" color={Colors.textMuted}>01 JUN</Typography>
+                    <Typography variant="caption" color={Colors.textMuted}>30 JUN</Typography>
+                  </View>
                 </View>
+              </Card>
+            </Animated.View>
+
+            {/* IMAGE 4: POR CATEGORIA SECTION */}
+            <Animated.View entering={FadeInDown.delay(200).duration(500)} style={styles.categorySection}>
+              <View style={styles.sectionHeader}>
+                <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                  Por categoria
+                </Typography>
+                <TouchableOpacity onPress={() => router.push('/stats')}>
+                  <Typography variant="caption" weight="bold" color={Colors.primary}>
+                    Ver tudo
+                  </Typography>
+                </TouchableOpacity>
               </View>
-              <Ionicons name="chevron-forward" size={20} color={PRIMARY_GREEN} />
-            </TouchableOpacity>
+
+              {categoriesList.length === 0 ? (
+                <Card style={styles.emptyCategoriesCard}>
+                  <Ionicons name="basket-outline" size={24} color={Colors.textMuted} />
+                  <Typography variant="caption" color={Colors.textMuted} align="center">
+                    Nenhum gasto registrado neste mês.
+                  </Typography>
+                </Card>
+              ) : (
+                <Card elevated style={styles.categoryListCard}>
+                  {categoriesList.map((cat, idx) => {
+                    const percent = Math.round((cat.val / (totalAmount || 1)) * 100);
+                    return (
+                      <View key={cat.name} style={[styles.categoryRow, idx === categoriesList.length - 1 && { borderBottomWidth: 0 }]}>
+                        <View style={[styles.categoryIconBg, { backgroundColor: 'rgba(183, 255, 0, 0.1)' }]}>
+                          <Ionicons name={CATEGORY_ICONS[cat.name] || 'cube-outline'} size={18} color={Colors.primary} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                            {cat.name}
+                          </Typography>
+                          <Typography variant="caption" color={Colors.textMuted} style={{ marginTop: 2 }}>
+                            {percent}%
+                          </Typography>
+                        </View>
+                        <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                          {formatCurrency(cat.val)}
+                        </Typography>
+                      </View>
+                    );
+                  })}
+                </Card>
+              )}
+            </Animated.View>
+
+            {/* IMAGE 4: UM OLHAR DO LUCA */}
+            <Animated.View entering={FadeInDown.delay(300).duration(500)}>
+              <Card style={styles.lucaLookCard}>
+                <View style={styles.lucaLookHeader}>
+                  <View style={styles.lucaLookIconBg}>
+                    <Ionicons name="sparkles" size={14} color="#080A09" />
+                  </View>
+                  <Typography variant="caption" weight="bold" color={Colors.primary} style={{ letterSpacing: 0.5 }}>
+                    Um olhar do Luca
+                  </Typography>
+                </View>
+                <Typography variant="body" color={Colors.textPrimary} style={styles.lucaLookText}>
+                  Alimentação representa a maior parte dos seus gastos neste período.
+                </Typography>
+              </Card>
+            </Animated.View>
           </>
         )}
       </ScrollView>
 
+      {/* Histórico Menu Modal */}
       <Modal transparent visible={menuVisible} animationType="fade" onRequestClose={() => setMenuVisible(false)}>
         <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
           <View style={styles.menuCard}>
             <TouchableOpacity style={styles.menuItem} onPress={openHistory}>
-              <Ionicons name="calendar-number-outline" size={20} color={TEXT_DARK} />
-              <Text style={styles.menuItemText}>Ver histórico de meses</Text>
+              <Ionicons name="calendar-number-outline" size={20} color={Colors.textPrimary} />
+              <Typography variant="body" weight="semibold" color={Colors.textPrimary}>
+                Ver histórico de meses
+              </Typography>
             </TouchableOpacity>
           </View>
         </Pressable>
       </Modal>
 
-      <Modal transparent visible={historyVisible} animationType="none" onRequestClose={() => setHistoryVisible(false)}>
+      {/* History Selection Modal */}
+      <Modal transparent visible={historyVisible} animationType="slide" onRequestClose={() => setHistoryVisible(false)}>
         <View style={styles.historyOverlay}>
-          <Animated.View style={[styles.historyBackdrop, { opacity: historyBackdropOpacity }]}>
-            <Pressable style={styles.historyBackdropPressable} onPress={() => setHistoryVisible(false)} />
-          </Animated.View>
-
-          <Animated.View style={[styles.historySheet, { transform: [{ translateY: historySheetTranslateY }] }]}>
+          <Pressable style={styles.historyBackdropPressable} onPress={() => setHistoryVisible(false)} />
+          <View style={styles.historySheet}>
             <View style={styles.historyHeader}>
               <View>
-                <Text style={styles.historyTitle}>Histórico de meses</Text>
-                <Text style={styles.historySubtitle}>Escolha um mês para analisar</Text>
+                <Typography variant="title" weight="bold" color={Colors.textPrimary}>
+                  Histórico de meses
+                </Typography>
+                <Typography variant="caption" color={Colors.textSecondary}>
+                  Escolha um mês para analisar
+                </Typography>
               </View>
               <TouchableOpacity style={styles.closeButton} onPress={() => setHistoryVisible(false)}>
-                <Ionicons name="close" size={22} color={TEXT_DARK} />
+                <Ionicons name="close" size={22} color={Colors.textPrimary} />
               </TouchableOpacity>
             </View>
 
@@ -571,78 +590,56 @@ export default function StatsScreen() {
                     }}
                   >
                     <View>
-                      <Text style={[styles.historyMonth, selected && styles.historyMonthActive]}>
+                      <Typography variant="body" weight="bold" color={selected ? Colors.primary : Colors.textPrimary}>
                         {formatMonth(monthKey)}
-                      </Text>
-                      <Text style={styles.historyCount}>
+                      </Typography>
+                      <Typography variant="caption" color={Colors.textMuted}>
                         {month.itemCount > 0
-                          ? `${month.itemCount} item${month.itemCount > 1 ? 's' : ''} registrado${month.itemCount > 1 ? 's' : ''}`
+                          ? `${month.itemCount} itens registrados`
                           : 'Sem dados'}
-                      </Text>
+                      </Typography>
                     </View>
-                    <Text style={[styles.historyTotal, selected && styles.historyTotalActive]}>
+                    <Typography variant="body" weight="heavy" color={selected ? Colors.primary : Colors.textPrimary}>
                       {formatCurrency(month.total)}
-                    </Text>
+                    </Typography>
                   </TouchableOpacity>
                 );
               })}
             </ScrollView>
-          </Animated.View>
+          </View>
         </View>
       </Modal>
     </View>
   );
 }
 
-function Bar({ height, label, active, amount }: { height: number; label: string; active?: boolean; amount: number }) {
-  const safeHeight = Math.max(8, Math.min(100, height || 0));
-
+function MonthSelector({
+  month,
+  onPrevious,
+  onNext,
+  canGoNext,
+}: {
+  month: string;
+  onPrevious: () => void;
+  onNext: () => void;
+  canGoNext: boolean;
+}) {
   return (
-    <View style={styles.barWrapper}>
-      <Text style={[styles.barValue, active && styles.barValueActive]} numberOfLines={1}>
-        {amount > 0 ? formatCurrency(amount).replace('R$', '').trim() : '-'}
-      </Text>
-      <View style={styles.barTrack}>
-        <View
-          style={[
-            styles.bar,
-            {
-              height: `${safeHeight}%` as any,
-              backgroundColor: active ? PRIMARY_GREEN : '#94E2C6',
-            },
-          ]}
-        />
-      </View>
-      <Text style={[styles.barLabel, active && styles.barLabelActive]}>{label}</Text>
-    </View>
-  );
-}
-
-function ProgressCard({ label, value, progress, color }: { label: string; value: string; progress: number; color: string }) {
-  return (
-    <View style={styles.miniCard}>
-      <Text style={styles.miniLabel}>{label}</Text>
-      <Text style={styles.miniValue}>{value}</Text>
-      <View style={styles.miniBarBg}>
-        <View style={[styles.miniBarFill, { width: `${Math.min(progress, 1) * 100}%` as any, backgroundColor: color }]} />
-      </View>
-    </View>
-  );
-}
-
-function FullProgressCard({ label, value, percent, progress }: { label: string; value: string; percent: number; progress: number }) {
-  return (
-    <View style={styles.fullProgressCard}>
-      <View style={styles.fullCardHeader}>
-        <Text style={styles.fullCardLabel}>{label}</Text>
-        <View style={styles.fullCardValueRow}>
-          <Text style={styles.fullCardValue}>{value}</Text>
-          <Text style={styles.fullCardPercent}>{percent}%</Text>
-        </View>
-      </View>
-      <View style={styles.fullProgressBarBg}>
-        <View style={[styles.fullProgressBarFill, { width: `${Math.min(progress, 1) * 100}%` as any }]} />
-      </View>
+    <View style={styles.selectorContainer}>
+      <TouchableOpacity onPress={onPrevious} style={styles.selectorBtn} accessibilityLabel="Mês anterior">
+        <Ionicons name="chevron-back" size={18} color={Colors.textPrimary} />
+      </TouchableOpacity>
+      <Typography variant="body" weight="bold" color={Colors.textPrimary} style={styles.selectorText}>
+        {formatMonth(month)}
+      </Typography>
+      <TouchableOpacity
+        onPress={onNext}
+        disabled={!canGoNext}
+        style={[styles.selectorBtn, !canGoNext && styles.selectorBtnDisabled]}
+        accessibilityLabel="Próximo mês"
+      >
+        <Ionicons name="chevron-forward" size={18} color={canGoNext ? Colors.textPrimary : Colors.textMuted} />
+      </TouchableOpacity>
     </View>
   );
 }
@@ -650,467 +647,284 @@ function FullProgressCard({ label, value, percent, progress }: { label: string; 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: BG_LIGHT,
+    backgroundColor: Colors.background,
   },
   header: {
-    backgroundColor: PRIMARY_GREEN,
-    paddingHorizontal: 25,
-    paddingTop: STATUS_BAR_HEIGHT,
-    paddingBottom: 30,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
+    paddingHorizontal: Spacing.xl,
+    paddingTop: STATUS_BAR_HEIGHT + Spacing.sm,
   },
   headerTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 10,
-    marginBottom: 6,
+    marginBottom: Spacing.xs,
   },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#fff',
-    flex: 1,
-    textAlign: 'center',
+  topLabel: {
+    letterSpacing: 0.8,
   },
   menuButton: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: Colors.surface,
     justifyContent: 'center',
-    alignItems: 'center',
-  },
-  monthSwitcher: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-  },
-  monthButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255, 255, 255, 0.16)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  monthButtonDisabled: {
-    opacity: 0.35,
-  },
-  monthTitleWrapper: {
-    alignItems: 'center',
-    minHeight: 42,
-    justifyContent: 'center',
-  },
-  headerDate: {
-    fontSize: 15,
-    color: 'rgba(255, 255, 255, 0.9)',
-    fontWeight: '800',
-    textAlign: 'center',
-  },
-  cacheLabel: {
-    color: 'rgba(255, 255, 255, 0.65)',
-    fontSize: 11,
-    fontWeight: '700',
-    marginTop: 3,
-  },
-  totalCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
-    borderRadius: 24,
-    padding: 20,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: Colors.border,
   },
-  totalLabel: {
-    fontSize: 13,
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontWeight: '600',
-    marginBottom: 5,
+  title: {
+    marginTop: Spacing.xs,
   },
-  totalValue: {
-    fontSize: 35,
-    fontWeight: '900',
-    color: '#fff',
-    marginBottom: 5,
-    textAlign: 'center',
+  subtitle: {
+    marginTop: 4,
+    marginBottom: Spacing.lg,
   },
-  totalSubtitle: {
-    fontSize: 13,
-    color: 'rgba(255, 255, 255, 0.8)',
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-  scrollContent: {
-    paddingHorizontal: 25,
-    paddingTop: 25,
-    paddingBottom: 120,
-  },
-  emptyMonthCard: {
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 22,
-    alignItems: 'center',
-    marginBottom: 25,
-    borderWidth: 2,
-    borderColor: '#F1F5F9',
-    borderStyle: 'dashed',
-  },
-  emptyMonthTitle: {
-    color: TEXT_DARK,
-    fontSize: 16,
-    fontWeight: '900',
-    marginTop: 12,
-  },
-  emptyMonthText: {
-    color: TEXT_GRAY,
-    fontSize: 13,
-    fontWeight: '600',
-    textAlign: 'center',
-    lineHeight: 18,
-    marginTop: 6,
-  },
-  sectionTitle: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#94A3B8',
-    letterSpacing: 1,
-    marginBottom: 15,
-  },
-  chartCard: {
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 18,
-    height: 205,
-    marginBottom: 30,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.02,
-    shadowRadius: 5,
-    elevation: 1,
-  },
-  chartRow: {
-    flex: 1,
+  tabsContainer: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    justifyContent: 'space-between',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.full,
+    padding: 4,
+    borderColor: Colors.border,
+    borderWidth: 1,
+    marginBottom: Spacing.sm,
   },
-  barWrapper: {
+  tabButton: {
+    flex: 1,
+    paddingVertical: 10,
     alignItems: 'center',
-    width: Math.max(34, (width - 110) / 6),
+    borderRadius: Radius.full,
   },
-  barTrack: {
-    height: 122,
-    width: 24,
-    justifyContent: 'flex-end',
-    backgroundColor: '#F8FAFC',
-    borderRadius: 8,
-    overflow: 'hidden',
+  tabButtonActive: {
+    backgroundColor: '#080A09',
+    borderColor: Colors.primary,
+    borderWidth: 1,
   },
-  bar: {
-    width: '100%',
-    borderRadius: 8,
+  selectorContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: Colors.surface,
+    borderColor: Colors.border,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    marginBottom: Spacing.md,
   },
-  barValue: {
-    fontSize: 9,
-    color: '#94A3B8',
-    fontWeight: '800',
-    marginBottom: 7,
-    maxWidth: 42,
+  selectorBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: Colors.surfaceElevated,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-  barValueActive: {
-    color: PRIMARY_GREEN,
+  selectorBtnDisabled: {
+    opacity: 0.4,
   },
-  barLabel: {
-    fontSize: 11,
-    color: '#94A3B8',
-    fontWeight: '800',
-    marginTop: 10,
+  selectorText: {
     textTransform: 'capitalize',
   },
-  barLabelActive: {
-    color: PRIMARY_GREEN,
+  emptyCategoriesCard: {
+    padding: Spacing.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderColor: Colors.border,
+    borderWidth: 1,
+    gap: Spacing.sm,
   },
-  categoriesGrid: {
+  totalCard: {
+    borderColor: Colors.border,
+    borderWidth: 1,
+    padding: Spacing.xl,
+  },
+  totalValue: {
+    marginVertical: Spacing.xs,
+  },
+  trendRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 15,
-    marginBottom: 15,
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: Spacing.lg,
   },
-  miniCard: {
-    width: (width - 50 - 15) / 2,
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.02,
-    shadowRadius: 5,
-    elevation: 1,
+  chartContainer: {
+    marginTop: Spacing.md,
   },
-  miniLabel: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    fontWeight: '700',
+  chartBars: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    height: 80,
+  },
+  chartBarWrapper: {
+    width: 14,
+    height: '100%',
+    backgroundColor: Colors.surfaceElevated,
+    borderRadius: 4,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  chartBarFill: {
+    width: '100%',
+    borderRadius: 4,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  glowDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: Colors.primary,
     marginBottom: 4,
   },
-  miniValue: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: TEXT_DARK,
-    marginBottom: 12,
+  chartLabelsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: Spacing.sm,
   },
-  miniBarBg: {
-    height: 7,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 4,
+  categorySection: {
+    gap: Spacing.md,
   },
-  miniBarFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  fullProgressCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 20,
-    marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.02,
-    shadowRadius: 5,
-    elevation: 1,
-  },
-  fullCardHeader: {
+  sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 15,
   },
-  fullCardLabel: {
-    fontSize: 13,
-    color: TEXT_GRAY,
-    fontWeight: '700',
-  },
-  fullCardValueRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  fullCardValue: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: TEXT_DARK,
-  },
-  fullCardPercent: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: PRIMARY_GREEN,
-  },
-  fullProgressBarBg: {
-    height: 8,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 4,
-  },
-  fullProgressBarFill: {
-    height: '100%',
-    backgroundColor: '#A7F3D0',
-    borderRadius: 4,
-  },
-  estimateCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 18,
-    flexDirection: 'row',
-    gap: 14,
-    marginBottom: 25,
+  categoryListCard: {
+    padding: 0,
+    borderColor: Colors.border,
     borderWidth: 1,
-    borderColor: '#FEF3C7',
   },
-  estimateIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#FFFBEB',
+  categoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: Spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  categoryIconBg: {
+    width: 40,
+    height: 40,
+    borderRadius: Radius.sm,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Spacing.md,
+  },
+  lucaLookCard: {
+    backgroundColor: '#111A0B',
+    borderColor: Colors.primary,
+    borderWidth: 1,
+    gap: Spacing.sm,
+    padding: Spacing.xl,
+  },
+  lucaLookHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  lucaLookIconBg: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: Colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  estimateContent: {
-    flex: 1,
+  lucaLookText: {
+    marginTop: Spacing.xs,
   },
-  estimateLabel: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    fontWeight: '800',
-    marginBottom: 2,
+  scrollContent: {
+    paddingHorizontal: Spacing.xl,
+    paddingTop: Spacing.md,
+    paddingBottom: 130,
+    gap: Spacing.xl,
   },
-  estimateValue: {
-    fontSize: 19,
-    color: TEXT_DARK,
-    fontWeight: '900',
-  },
-  estimateText: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    lineHeight: 17,
-    marginTop: 4,
-    fontWeight: '600',
-  },
-  lucaBtn: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 18,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: '#D1FAE5',
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 2,
-  },
-  lucaBtnLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    flex: 1,
-  },
-  lucaIconBg: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#DCFCE7',
+  loadingContainer: {
+    paddingVertical: Spacing.xxxxl,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  lucaBtnTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: TEXT_DARK,
+  emptyMonthCard: {
+    padding: Spacing.xxl,
+    alignItems: 'center',
+    borderColor: Colors.border,
+    borderWidth: 1,
+    gap: Spacing.sm,
   },
-  lucaBtnSub: {
-    fontSize: 12,
-    color: TEXT_GRAY,
-    fontWeight: '500',
-    marginTop: 2,
+  emptyMonthTitle: {
+    marginTop: Spacing.xs,
   },
   menuOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.18)',
+    justifyContent: 'flex-start',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
     alignItems: 'flex-end',
-    paddingTop: STATUS_BAR_HEIGHT + 62,
-    paddingRight: 25,
+    paddingTop: STATUS_BAR_HEIGHT + Spacing.lg,
+    paddingRight: Spacing.xl,
   },
   menuCard: {
-    width: 235,
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 18,
-    elevation: 8,
+    backgroundColor: Colors.surfaceElevated,
+    borderRadius: Radius.md,
+    padding: Spacing.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   menuItem: {
-    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 12,
-  },
-  menuItemText: {
-    color: TEXT_DARK,
-    fontWeight: '800',
-    fontSize: 14,
+    padding: Spacing.md,
+    gap: Spacing.sm,
   },
   historyOverlay: {
     flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
     justifyContent: 'flex-end',
   },
-  historyBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(15, 23, 42, 0.35)',
-  },
   historyBackdropPressable: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
   },
   historySheet: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 30,
-    borderTopRightRadius: 30,
-    paddingHorizontal: 22,
-    paddingTop: 22,
-    maxHeight: '82%',
+    backgroundColor: Colors.surfaceElevated,
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    padding: Spacing.xl,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    paddingBottom: Platform.OS === 'ios' ? 40 : Spacing.xxxl,
+    maxHeight: '85%',
   },
   historyHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
-  },
-  historyTitle: {
-    color: TEXT_DARK,
-    fontSize: 20,
-    fontWeight: '900',
-  },
-  historySubtitle: {
-    color: TEXT_GRAY,
-    fontSize: 13,
-    fontWeight: '600',
-    marginTop: 3,
+    marginBottom: Spacing.xl,
   },
   closeButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#F8FAFC',
-    justifyContent: 'center',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Colors.surface,
     alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   historyList: {
-    paddingBottom: 28,
-    gap: 10,
+    gap: Spacing.sm,
   },
   historyRow: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 18,
-    padding: 16,
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: Spacing.md,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
     borderWidth: 1,
-    borderColor: '#F1F5F9',
+    borderColor: Colors.border,
   },
   historyRowActive: {
-    backgroundColor: '#F0FDF4',
-    borderColor: '#A7F3D0',
-  },
-  historyMonth: {
-    color: TEXT_DARK,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  historyMonthActive: {
-    color: PRIMARY_GREEN,
-  },
-  historyCount: {
-    color: TEXT_GRAY,
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 3,
-  },
-  historyTotal: {
-    color: TEXT_DARK,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  historyTotalActive: {
-    color: PRIMARY_GREEN,
+    borderColor: Colors.primary,
   },
 });

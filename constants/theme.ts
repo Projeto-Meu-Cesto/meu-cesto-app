@@ -1,84 +1,117 @@
-/**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
- */
-
 import { Platform, StatusBar } from 'react-native';
 
-const tintColorLight = '#0a7ea4';
-const tintColorDark = '#fff';
+/**
+ * Design System - Meu Cesto
+ * Direção Visual: DARK / PREMIUM / FRIENDLY / INTELLIGENT / MOBILE-FIRST
+ * Dark Mode Exclusivo.
+ */
 
 export const Colors = {
+  background: '#080A09',
+  surface: '#111411',
+  surfaceElevated: '#171B17',
+  border: '#242A24',
+  primary: '#B7FF00',
+  primaryDark: '#83B800',
+  textPrimary: '#F5F7F2',
+  textSecondary: '#A4ABA1',
+  textMuted: '#6F766D',
+  error: '#FF5C5C',
+  warning: '#FFC857',
+  
+  // Aliases required by some Expo standard components (if they use Colors.light.text for some reason)
   light: {
-    text: '#11181C',
-    background: '#fff',
-    tint: tintColorLight,
-    icon: '#687076',
-    tabIconDefault: '#687076',
-    tabIconSelected: tintColorLight,
+    text: '#F5F7F2',
+    background: '#080A09',
+    tint: '#B7FF00',
+    icon: '#A4ABA1',
+    tabIconDefault: '#6F766D',
+    tabIconSelected: '#B7FF00',
   },
   dark: {
-    text: '#ECEDEE',
-    background: '#151718',
-    tint: tintColorDark,
-    icon: '#9BA1A6',
-    tabIconDefault: '#9BA1A6',
-    tabIconSelected: tintColorDark,
-  },
+    text: '#F5F7F2',
+    background: '#080A09',
+    tint: '#B7FF00',
+    icon: '#A4ABA1',
+    tabIconDefault: '#6F766D',
+    tabIconSelected: '#B7FF00',
+  }
 };
 
-export const Fonts = Platform.select({
-  ios: {
-    /** iOS `UIFontDescriptorSystemDesignDefault` */
-    sans: 'system-ui',
-    /** iOS `UIFontDescriptorSystemDesignSerif` */
-    serif: 'ui-serif',
-    /** iOS `UIFontDescriptorSystemDesignRounded` */
-    rounded: 'ui-rounded',
-    /** iOS `UIFontDescriptorSystemDesignMonospaced` */
-    mono: 'ui-monospace',
-  },
-  default: {
-    sans: 'normal',
-    serif: 'serif',
-    rounded: 'normal',
-    mono: 'monospace',
-  },
-  web: {
-    sans: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-    serif: "Georgia, 'Times New Roman', serif",
-    rounded: "'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif",
-    mono: "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-  },
-});
+export const Spacing = {
+  xs: 4,
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 24,
+  xxl: 32,
+  xxxl: 48,
+  xxxxl: 64,
+};
 
-// ─── Design System — Meu Cesto ────────────────────────────────────────────────
+export const Radius = {
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 24,
+  xxl: 32,
+  full: 9999,
+};
 
-/** Verde principal do app */
-export const PRIMARY_GREEN = '#00A36C';
-/** Fundo claro padrão das telas */
-export const BG_LIGHT      = '#F8FAFC';
-/** Texto escuro principal */
-export const TEXT_DARK     = '#1E293B';
-/** Texto cinza secundário */
-export const TEXT_GRAY     = '#64748B';
-/** Cor de perigo / erro */
-export const DANGER        = '#EF4444';
-/** Cor de alerta / aviso */
-export const WARNING       = '#F59E0B';
-/** Fundo escuro da tab bar */
-export const TAB_BG        = '#0F172A';
+export function nestedRadius(innerRadius: number, padding: number): number {
+  return innerRadius + padding;
+}
 
-/**
- * Altura da status bar:
- * - Android: usa StatusBar.currentHeight (inclui notch)
- * - iOS: 54px cobre Dynamic Island e notch do iPhone
- */
+export const Typography = {
+  fonts: Platform.select({
+    ios: {
+      sans: 'System',
+      serif: 'System',
+      rounded: 'System',
+      mono: 'System',
+    },
+    default: {
+      sans: 'sans-serif',
+      serif: 'serif',
+      rounded: 'sans-serif',
+      mono: 'monospace',
+    },
+  }),
+  sizes: {
+    display: 32,
+    heading: 24,
+    title: 18,
+    body: 16,
+    caption: 12,
+  },
+  lineHeights: {
+    display: 40,
+    heading: 32,
+    title: 24,
+    body: 24,
+    caption: 16,
+  },
+  weights: {
+    regular: '400' as const,
+    medium: '500' as const,
+    semibold: '600' as const,
+    bold: '700' as const,
+    heavy: '800' as const,
+  }
+};
+
 export const STATUS_BAR_HEIGHT =
   Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 54;
 
-/**
- * Versão compacta para telas sem Dynamic Island (ex: addItem header menor).
- */
 export const STATUS_BAR_HEIGHT_SM =
   Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 44;
+
+// --- DEPRECATED ALIASES FOR MIGRATION ---
+export const PRIMARY_GREEN = Colors.primary;
+export const BG_LIGHT = Colors.background;
+export const TEXT_DARK = Colors.textPrimary;
+export const TEXT_GRAY = Colors.textSecondary;
+export const DANGER = Colors.error;
+export const WARNING = Colors.warning;
+export const TAB_BG = '#0F172A'; // Keep old for now if used directly
+export const Fonts = Typography.fonts;

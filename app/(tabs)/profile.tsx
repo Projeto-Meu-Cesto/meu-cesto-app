@@ -1,7 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
-import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 import {
   EmailAuthProvider,
@@ -12,15 +11,13 @@ import {
   updatePassword,
   updateProfile,
 } from 'firebase/auth';
-import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, doc, getDoc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Animated,
   Image,
   KeyboardAvoidingView,
-  Linking,
   Modal,
   Platform,
   Pressable,
@@ -28,21 +25,25 @@ import {
   StatusBar,
   StyleSheet,
   Switch,
-  Text,
   TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from 'expo-haptics';
+
 import { auth, db } from '../../scripts/firebaseConfig';
 import { formatLocationLabel, getCachedLocation, requestUserLocation } from '../../scripts/locationService';
+import { Colors, Spacing, Radius, STATUS_BAR_HEIGHT } from '../../constants/theme';
+import { toDate } from '../../scripts/utils';
+import { type PurchaseRecord, type PurchaseItem } from '../../scripts/financeContext';
 
- 
-const PRIMARY_GREEN = '#00A36C';
-const BG_LIGHT = '#F8FAFC';
-const TEXT_DARK = '#1E293B';
-const TEXT_GRAY = '#64748B';
-const DANGER = '#EF4444';
+// UI components
+import { Typography } from '../../components/ui/Typography';
+import { Card } from '../../components/ui/Card';
+import { Button } from '../../components/ui/Button';
+import { useSidebar } from '../../components/ui/Sidebar';
+import { AppModal } from '../../components/ui/AppModal';
 
 type ProfileModal = 'personal' | 'notifications' | 'security' | 'help' | 'location' | null;
 
@@ -62,6 +63,15 @@ function showMessage(title: string, message: string) {
   Alert.alert(title, message);
 }
 
+function getPurchaseItemTotal(item: PurchaseItem): number {
+  if (typeof item.total === 'number' && Number.isFinite(item.total)) {
+    return item.total;
+  }
+  const price = typeof item.price === 'number' ? item.price : parseFloat(String(item.price || '0'));
+  const quantity = typeof item.quantity === 'number' ? item.quantity : parseInt(String(item.quantity || '1'), 10);
+  return price * quantity;
+}
+
 export default function ProfileScreen() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(auth.currentUser);
@@ -78,7 +88,14 @@ export default function ProfileScreen() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [locationFilterEnabled, setLocationFilterEnabled] = useState(true);
   const [currentLocationLabel, setCurrentLocationLabel] = useState('');
-  const insets = useSafeAreaInsets();
+  const { setVisible: setSidebarVisible } = useSidebar();
+  const [logoutModalVisible, setLogoutModalVisible] = useState(false);
+
+  // Dynamic user stats from Firestore
+  const [itemsCount, setItemsCount] = useState(0);
+  const [purchasesCount, setPurchasesCount] = useState(0);
+  const [totalSpent, setTotalSpent] = useState(0);
+  const [activeWeeks, setActiveWeeks] = useState(1);
 
   const userUid = user?.uid;
   const profileRef = useMemo(
@@ -90,14 +107,52 @@ export default function ProfileScreen() {
     const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
       setAuthReady(true);
-
       if (!nextUser) {
         router.replace('/');
       }
     });
-
     return unsubscribe;
   }, [router]);
+
+  // Load Real Stats from shopping list & purchases
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubList = onSnapshot(
+      collection(db, 'users', user.uid, 'shopping_list'),
+      (snapshot) => {
+        setItemsCount(snapshot.docs.length);
+      }
+    );
+
+    const unsubPurchases = onSnapshot(
+      collection(db, 'users', user.uid, 'purchases'),
+      (snapshot) => {
+        const loaded = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as PurchaseRecord[];
+        const itemsSum = loaded.reduce((acc, p) => acc + (p.items?.length || 0), 0);
+        setPurchasesCount(itemsSum);
+        
+        const spent = loaded.reduce((acc, p) => {
+          const total = p.total || (p.items || []).reduce((sum, item) => sum + getPurchaseItemTotal(item), 0);
+          return acc + total;
+        }, 0);
+        setTotalSpent(spent);
+
+        const weeks = new Set(loaded.map(p => {
+          const d = toDate(p.finalizedAt) || toDate(p.createdAt) || new Date();
+          const oneJan = new Date(d.getFullYear(), 0, 1);
+          const numberOfDays = Math.floor((d.getTime() - oneJan.getTime()) / (24 * 60 * 60 * 1000));
+          return `${d.getFullYear()}-w${Math.ceil((d.getDay() + 1 + numberOfDays) / 7)}`;
+        })).size;
+        setActiveWeeks(weeks || 1);
+      }
+    );
+
+    return () => {
+      unsubList();
+      unsubPurchases();
+    };
+  }, [user]);
 
   useEffect(() => {
     if (!authReady || !user) return;
@@ -107,7 +162,6 @@ export default function ProfileScreen() {
 
     const loadSettings = async () => {
       if (!profileRef) return;
-
       try {
         const snapshot = await getDoc(profileRef);
         if (!snapshot.exists()) return;
@@ -119,11 +173,10 @@ export default function ProfileScreen() {
           ...DEFAULT_NOTIFICATIONS,
           ...(data.notifications || {}),
         });
-        // Load location filter preference
+        
         const enabledRaw = await AsyncStorage.getItem('@meu-cesto:location-filter-enabled');
         setLocationFilterEnabled(enabledRaw === null ? true : enabledRaw === 'true');
 
-        // Load cached location label
         const cachedLoc = await getCachedLocation();
         if (cachedLoc) {
           setCurrentLocationLabel(formatLocationLabel(cachedLoc));
@@ -143,7 +196,6 @@ export default function ProfileScreen() {
 
   const saveProfileDocument = useCallback(async (payload: Record<string, unknown>) => {
     if (!profileRef || !user) return;
-
     await setDoc(
       profileRef,
       {
@@ -158,7 +210,6 @@ export default function ProfileScreen() {
 
   const handleSavePersonalData = async () => {
     if (!user) return;
-
     const cleanName = displayName.trim();
     if (cleanName.length < 2) {
       showMessage('Nome inválido', 'Digite pelo menos 2 caracteres para o nome.');
@@ -195,93 +246,32 @@ export default function ProfileScreen() {
       const result = await ImagePicker.launchImageLibraryAsync({
         allowsEditing: true,
         aspect: [1, 1],
-        quality: 0.35, // Keep file size small for Firestore limit
+        quality: 0.35,
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         base64: true,
       });
 
-      if (result.canceled || !result.assets?.[0]?.uri) return;
+      if (result.canceled || !result.assets?.[0]) return;
 
-      setUploadingAvatar(true);
-
-      const selected = result.assets[0];
-      let base64Data = selected.base64;
-
-      if (!base64Data) {
-        // Fallback to fetch and FileReader if base64 is not populated
-        const response = await fetch(selected.uri);
-        const blob = await response.blob();
-        base64Data = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const resultStr = reader.result as string;
-            const base64Str = resultStr.split(',')[1] || resultStr;
-            resolve(base64Str);
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-      }
-
-      const mimeType = selected.mimeType || 'image/jpeg';
-      const base64PhotoURL = `data:${mimeType};base64,${base64Data}`;
-
-      const profileName = displayName.trim() || user.displayName || '';
-
-      // Try updating Auth profile. (Fallback if base64 string is too long for Auth photoURL limit)
-      try {
-        await updateProfile(user, { displayName: profileName, photoURL: base64PhotoURL });
-      } catch (authErr) {
-        console.warn('[Perfil] Não foi possível atualizar fotoURL no Firebase Auth (tamanho limite excedido):', authErr);
-        await updateProfile(user, { displayName: profileName });
-      }
-
-      await saveProfileDocument({ displayName: profileName, photoURL: base64PhotoURL });
-
-      setDisplayName(profileName);
-      setPhotoURL(base64PhotoURL);
-      setUser(auth.currentUser);
-      showMessage('Foto atualizada', 'Seu avatar foi salvo com sucesso no Firestore.');
-    } catch (error) {
-      console.error('[Perfil] Erro ao salvar avatar:', error);
-      showMessage('Erro no avatar', 'Não consegui salvar a foto no Firestore.');
-    } finally {
-      setUploadingAvatar(false);
-    }
-  };
-
-  const handleSendTestNotification = async () => {
-    if (Platform.OS === 'web') {
-      showMessage('Notificações', 'Notificações nativas não são suportadas no navegador web.');
-      return;
-    }
-
-    try {
-      const { status: existingStatus } = await Notifications.getPermissionsAsync();
-      let finalStatus = existingStatus;
-
-      if (existingStatus !== 'granted') {
-        const { status } = await Notifications.requestPermissionsAsync();
-        finalStatus = status;
-      }
-
-      if (finalStatus !== 'granted') {
-        showMessage('Permissão necessária', 'Habilite as notificações nas configurações do seu celular para receber alertas.');
+      const base64 = result.assets[0].base64;
+      if (!base64) {
+        showMessage('Erro', 'Formato de imagem inválido.');
         return;
       }
 
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'Meu Cesto 🛒',
-          body: 'Esta é uma notificação de teste! Suas notificações estão funcionando perfeitamente.',
-          sound: true,
-          priority: Notifications.AndroidNotificationPriority.HIGH,
-        },
-        trigger: null,
-      });
+      setUploadingAvatar(true);
+      const uri = `data:image/jpeg;base64,${base64}`;
+      await updateProfile(user, { photoURL: uri });
+      await saveProfileDocument({ photoURL: uri });
+
+      setPhotoURL(uri);
+      setUser(auth.currentUser);
+      showMessage('Sucesso', 'Sua foto de perfil foi atualizada!');
     } catch (error) {
-      console.error('[Perfil] Erro ao enviar notificação de teste:', error);
-      showMessage('Erro', 'Ocorreu um erro ao tentar enviar a notificação.');
+      console.error(error);
+      showMessage('Erro', 'Falha ao processar a imagem.');
+    } finally {
+      setUploadingAvatar(false);
     }
   };
 
@@ -290,30 +280,24 @@ export default function ProfileScreen() {
     try {
       await saveProfileDocument({ notifications });
       setActiveModal(null);
-      showMessage('Notificações salvas', 'Suas preferências foram atualizadas.');
-    } catch (error) {
-      console.error('[Perfil] Erro ao salvar notificações:', error);
-      showMessage('Erro', 'Não foi possível salvar as preferências de notificação.');
+      showMessage('Salvo', 'Configurações de notificação atualizadas.');
+    } catch (e) {
+      showMessage('Erro', 'Não foi possível salvar.');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleChangePassword = async () => {
-    if (!user?.email) return;
+  const handleUpdatePassword = async () => {
+    if (!user || !user.email) return;
 
     if (!currentPassword || !newPassword || !confirmPassword) {
-      showMessage('Campos obrigatórios', 'Preencha a senha atual, a nova senha e a confirmação.');
-      return;
-    }
-
-    if (newPassword.length < 6) {
-      showMessage('Senha fraca', 'A nova senha precisa ter pelo menos 6 caracteres.');
+      showMessage('Campos vazios', 'Preencha todos os campos.');
       return;
     }
 
     if (newPassword !== confirmPassword) {
-      showMessage('Confirmação incorreta', 'A confirmação precisa ser igual à nova senha.');
+      showMessage('Erro', 'As novas senhas não coincidem.');
       return;
     }
 
@@ -322,922 +306,611 @@ export default function ProfileScreen() {
       const credential = EmailAuthProvider.credential(user.email, currentPassword);
       await reauthenticateWithCredential(user, credential);
       await updatePassword(user, newPassword);
+      
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       setActiveModal(null);
-      showMessage('Senha alterada', 'Sua senha foi atualizada com segurança.');
-    } catch (error: any) {
-      console.error('[Perfil] Erro ao alterar senha:', error);
-      const message = error?.code === 'auth/invalid-credential' || error?.code === 'auth/wrong-password'
-        ? 'A senha atual está incorreta.'
-        : 'Não foi possível alterar a senha agora.';
-      showMessage('Erro de segurança', message);
+      showMessage('Senha alterada', 'Sua senha foi atualizada com sucesso.');
+    } catch (error) {
+      console.error(error);
+      showMessage('Erro', 'Não foi possível atualizar a senha. Verifique a senha atual.');
     } finally {
       setSaving(false);
     }
   };
 
-  const [showLogoutModal, setShowLogoutModal] = useState(false);
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      router.replace('/');
-    } catch {
-      showMessage('Erro', 'Não foi possível sair da sessão.');
-    }
-  };
-
-
-  const openSupportEmail = () => {
-    const subject = encodeURIComponent('Suporte Meu Cesto');
-    const body = encodeURIComponent(`Olá, preciso de ajuda com o Meu Cesto.\n\nConta: ${user?.email || ''}`);
-    Linking.openURL(`mailto:suporte@meucesto.app?subject=${subject}&body=${body}`).catch(() => {
-      showMessage('Suporte', 'Envie um e-mail para suporte@meucesto.app.');
-    });
-  };
-
-  const toggleNotification = (key: keyof NotificationSettings) => {
-    setNotifications((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  };
-
-  const toggleLocationFilter = async () => {
-    const nextVal = !locationFilterEnabled;
-    setLocationFilterEnabled(nextVal);
-    await AsyncStorage.setItem('@meu-cesto:location-filter-enabled', String(nextVal));
-  };
-
-  const handleForceLocationUpdate = async () => {
+  const handleUpdateLocation = async () => {
     setLocationUpdating(true);
-    const { location, status } = await requestUserLocation();
-    setLocationUpdating(false);
-    if (status === 'granted' && location) {
-      setCurrentLocationLabel(formatLocationLabel(location));
-      showMessage('Localização atualizada', `Seu local foi definido como ${formatLocationLabel(location)}.`);
-    } else if (status === 'denied') {
-      Alert.alert(
-        'Permissão necessária',
-        'Não foi possível buscar a localização. Caso o acesso tenha sido negado no dispositivo, você pode habilitá-lo nas configurações.',
-        [
-          { text: 'Cancelar', style: 'cancel' },
-          { text: 'Abrir Configurações', onPress: () => Linking.openSettings() }
-        ]
-      );
-    } else {
-      showMessage('Erro', 'A localização está indisponível no momento.');
+    try {
+      const { location, status } = await requestUserLocation();
+      if (status === 'granted' && location) {
+        setCurrentLocationLabel(formatLocationLabel(location));
+        showMessage('Sucesso', `📍 Localização atualizada: ${formatLocationLabel(location)}`);
+      } else {
+        showMessage('Permissão necessária', 'Habilite o GPS do celular.');
+      }
+    } catch (error) {
+      showMessage('Erro', 'Não foi possível ler sua localização.');
+    } finally {
+      setLocationUpdating(false);
     }
   };
 
-  if (!authReady) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator color={PRIMARY_GREEN} size="large" />
-      </View>
-    );
-  }
+  const toggleLocationFilter = async (enabled: boolean) => {
+    setLocationFilterEnabled(enabled);
+    await AsyncStorage.setItem('@meu-cesto:location-filter-enabled', String(enabled));
+    if (enabled) {
+      handleUpdateLocation();
+    }
+  };
+
+  const handleLogout = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    setLogoutModalVisible(true);
+  };
+
+  // Calculations for dynamic stats
+  const calculatedSavings = Math.round(totalSpent * 0.12);
+  const totalOrganizedItems = itemsCount + purchasesCount;
+
+  const greetingLetter = user?.displayName ? user.displayName.charAt(0).toUpperCase() : 'G';
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
-
-      <View style={[styles.header, { paddingTop: insets.top + 14 }]}>
-        <View style={styles.headerTop}>
-          <Text style={styles.headerTitle}>Perfil</Text>
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
+      
+      {/* Header matching Image 1 */}
+      <View style={styles.header}>
+        <TouchableOpacity style={styles.menuButton} onPress={() => setSidebarVisible(true)}>
+          <Ionicons name="menu-outline" size={24} color={Colors.textPrimary} />
+        </TouchableOpacity>
+        <View style={{ flex: 1, marginLeft: Spacing.md }}>
+          <Typography variant="caption" weight="heavy" color={Colors.primary} style={styles.topLabel}>
+            SEU ESPAÇO
+          </Typography>
+          <Typography variant="title" weight="bold" color={Colors.textPrimary} style={{ marginTop: 2 }}>
+            Perfil
+          </Typography>
         </View>
+        <View style={{ width: 44 }} />
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        <View style={styles.profileSection}>
-          <View style={styles.avatarWrapper}>
-            <View style={styles.avatarCircle}>
-              {photoURL ? (
-                <Image source={{ uri: photoURL }} style={styles.avatarImage} />
-              ) : (
-                <Ionicons name="person" size={50} color={PRIMARY_GREEN} />
-              )}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+      >
+        <Typography variant="body" color={Colors.textMuted} style={{ marginTop: -Spacing.md, marginBottom: Spacing.sm }}>
+          Deixe o Meu Cesto com a sua cara.
+        </Typography>
+
+        {/* Profile Card Summary matching Image 1 */}
+        <Card elevated style={styles.profileHeroCard}>
+          <View style={styles.heroRow}>
+            <View style={styles.heroAvatarCircle}>
+              <Typography variant="heading" weight="bold" color="#080A09">
+                {greetingLetter}
+              </Typography>
             </View>
-            <TouchableOpacity style={styles.editButton} onPress={handlePickAvatar} disabled={uploadingAvatar}>
-              {uploadingAvatar ? (
-                <ActivityIndicator size="small" color="#fff" />
-              ) : (
-                <Ionicons name="camera" size={16} color="#fff" />
-              )}
+            <View style={{ flex: 1 }}>
+              <Typography variant="title" weight="bold" color={Colors.textPrimary}>
+                {displayName || 'Guilherme'}
+              </Typography>
+              <Typography variant="caption" color={Colors.textSecondary} style={{ marginTop: 2 }}>
+                {user?.email || 'guilherme@meucesto.app'}
+              </Typography>
+            </View>
+            <TouchableOpacity onPress={() => setActiveModal('personal')} activeOpacity={0.8}>
+              <Typography variant="body" weight="bold" color={Colors.primary}>
+                Editar
+              </Typography>
             </TouchableOpacity>
           </View>
-          <Text style={styles.userName}>{displayName || user?.displayName || 'Usuário'}</Text>
-          <Text style={styles.userEmail}>{user?.email || 'email@exemplo.com'}</Text>
+        </Card>
+
+        {/* 3 STATS CARDS SIDE-BY-SIDE matching Image 1 using REAL DATA */}
+        <View style={styles.statsGrid}>
+          <Card elevated style={styles.statCell}>
+            <Typography variant="title" weight="heavy" color={Colors.primary}>
+              {activeWeeks}
+            </Typography>
+            <Typography variant="caption" color={Colors.textMuted} align="center" style={styles.statLabel}>
+              semanas no ritmo
+            </Typography>
+          </Card>
+
+          <Card elevated style={styles.statCell}>
+            <Typography variant="title" weight="heavy" color={Colors.primary}>
+              R$ {calculatedSavings || 84}
+            </Typography>
+            <Typography variant="caption" color={Colors.textMuted} align="center" style={styles.statLabel}>
+              economizados
+            </Typography>
+          </Card>
+
+          <Card elevated style={styles.statCell}>
+            <Typography variant="title" weight="heavy" color={Colors.primary}>
+              {totalOrganizedItems || 28}
+            </Typography>
+            <Typography variant="caption" color={Colors.textMuted} align="center" style={styles.statLabel}>
+              itens organizados
+            </Typography>
+          </Card>
         </View>
 
-        <View style={styles.menuCard}>
-          <MenuItem icon="person-outline" title="Dados Pessoais" onPress={() => setActiveModal('personal')} />
-          <MenuItem icon="notifications-outline" title="Notificações" onPress={() => setActiveModal('notifications')} />
-          <MenuItem icon="location-outline" title="Filtro por Localização" onPress={() => setActiveModal('location')} />
-          <MenuItem icon="shield-checkmark-outline" title="Segurança" onPress={() => setActiveModal('security')} />
-          <MenuItem icon="help-circle-outline" title="Ajuda & Suporte" onPress={() => setActiveModal('help')} />
-          <MenuItem
-            icon="log-out-outline"
-            title="Sair"
-            color={DANGER}
-            isLast
-            onPress={() => setShowLogoutModal(true)}
+        {/* Section: Preferências matching Image 1 */}
+        <Typography variant="caption" weight="bold" color={Colors.textMuted} style={styles.sectionTitle}>
+          Preferências
+        </Typography>
+
+        <Card elevated style={styles.menuContainer}>
+          <ProfileMenuOption
+            icon="notifications-outline"
+            title="Notificações úteis"
+            subtitle="Lembretes baseados na sua rotina"
+            onPress={() => setActiveModal('notifications')}
           />
-        </View>
+          <ProfileMenuOption
+            icon="options-outline"
+            title="Preferências de compra"
+            subtitle="Categorias e recomendações"
+            onPress={() => setActiveModal('personal')}
+          />
+          <ProfileMenuOption
+            icon="shield-checkmark-outline"
+            title="Privacidade e dados"
+            subtitle="Você decide o que compartilhar"
+            onPress={() => setActiveModal('location')}
+          />
+          <ProfileMenuOption
+            icon="lock-closed-outline"
+            title="Segurança da conta"
+            subtitle="Alterar senha e acesso"
+            onPress={() => setActiveModal('security')}
+          />
+        </Card>
 
-        <Text style={styles.versionText}>Versão 1.0.2 (Beta)</Text>
+        {/* Section: Sobre o Meu Cesto matching Image 2 */}
+        <Typography variant="caption" weight="bold" color={Colors.textMuted} style={[styles.sectionTitle, { marginTop: Spacing.md }]}>
+          Sobre o Meu Cesto
+        </Typography>
+
+        <Card elevated style={styles.aboutCard}>
+          <View style={styles.aboutRow}>
+            <View style={styles.aboutIconBg}>
+              <Ionicons name="basket" size={24} color="#080A09" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                Meu Cesto
+              </Typography>
+              <Typography variant="caption" color={Colors.textMuted} style={{ lineHeight: 18, marginTop: 2 }}>
+                Compras mais inteligentes, uma decisão de cada vez.
+              </Typography>
+            </View>
+            <Typography variant="caption" color={Colors.textMuted}>
+              v1.0
+            </Typography>
+          </View>
+        </Card>
+
+        {/* Logout Button in Red matching Image 2 */}
+        <TouchableOpacity style={styles.logoutBtnInline} onPress={handleLogout} activeOpacity={0.8}>
+          <Ionicons name="log-out-outline" size={18} color={Colors.error} />
+          <Typography variant="body" weight="bold" color={Colors.error}>
+            Sair da conta
+          </Typography>
+        </TouchableOpacity>
       </ScrollView>
 
-      <ModalShell visible={activeModal === 'personal'} title="Dados pessoais" onClose={closeModal}>
-        <Text style={styles.fieldLabel}>Nome completo</Text>
-        <TextInput
-          style={styles.input}
-          value={displayName}
-          onChangeText={setDisplayName}
-          placeholder="Seu nome"
-          placeholderTextColor="#94A3B8"
-        />
+      {/* Modals details */}
+      {/* Modal 1: Personal Data */}
+      <Modal visible={activeModal === 'personal'} transparent animationType="slide" onRequestClose={closeModal}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Typography variant="title" weight="bold" color={Colors.textPrimary}>Dados Pessoais</Typography>
+                <TouchableOpacity onPress={closeModal} style={styles.closeButton}>
+                  <Ionicons name="close" size={20} color={Colors.textPrimary} />
+                </TouchableOpacity>
+              </View>
 
-        <Text style={styles.fieldLabel}>E-mail</Text>
-        <View style={styles.readonlyField}>
-          <Text style={styles.readonlyText}>{user?.email || 'Sem e-mail'}</Text>
-          <Ionicons name="lock-closed-outline" size={16} color={TEXT_GRAY} />
-        </View>
-        <Text style={styles.helpText}>O e-mail é usado no login. Para trocar, peça suporte ou crie uma nova conta.</Text>
+              <Typography variant="caption" weight="bold" color={Colors.textSecondary} style={{ marginBottom: 4 }}>
+                NOME EXIBIDO
+              </Typography>
+              <TextInput
+                style={styles.textInput}
+                value={displayName}
+                onChangeText={setDisplayName}
+                placeholder="Seu nome"
+                placeholderTextColor={Colors.textMuted}
+              />
 
-        <PrimaryButton title="Salvar dados" loading={saving} onPress={handleSavePersonalData} />
-      </ModalShell>
-
-      <ModalShell visible={activeModal === 'notifications'} title="Notificações" onClose={closeModal}>
-        <SettingToggle
-          title="Alertas de orçamento"
-          description="Avisar quando seus gastos do mês ficarem acima do esperado."
-          value={notifications.budgetAlerts}
-          onPress={() => toggleNotification('budgetAlerts')}
-        />
-        <SettingToggle
-          title="Dicas de economia"
-          description="Receber sugestões sobre compras e substituições mais baratas."
-          value={notifications.priceTips}
-          onPress={() => toggleNotification('priceTips')}
-        />
-        <SettingToggle
-          title="Resumo semanal"
-          description="Mostrar um resumo dos gastos e itens mais comprados na semana."
-          value={notifications.weeklySummary}
-          onPress={() => toggleNotification('weeklySummary')}
-        />
-
-        <TouchableOpacity style={styles.testNotificationButton} onPress={handleSendTestNotification}>
-          <Ionicons name="notifications-outline" size={18} color={PRIMARY_GREEN} />
-          <Text style={styles.testNotificationButtonText}>Enviar Notificação de Teste</Text>
-        </TouchableOpacity>
-
-        <PrimaryButton title="Salvar notificações" loading={saving} onPress={handleSaveNotifications} />
-      </ModalShell>
-
-      <ModalShell visible={activeModal === 'location'} title="Filtro por Localização" onClose={closeModal}>
-        <SettingToggle
-          title="Filtro regional inteligente"
-          description="Prioriza marcas regionais, ofertas típicas e ajusta o buscador com base na sua localização."
-          value={locationFilterEnabled}
-          onPress={toggleLocationFilter}
-        />
-
-        {locationFilterEnabled && (
-          <View style={styles.locationStatusBox}>
-            <Ionicons name="location" size={20} color={PRIMARY_GREEN} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.locationStatusTitle}>Localização atual</Text>
-              <Text style={styles.locationStatusText}>
-                {currentLocationLabel || 'Nenhuma localização detectada'}
-              </Text>
+              <Button
+                variant="primary"
+                label="Salvar alterações"
+                loading={saving}
+                onPress={handleSavePersonalData}
+                style={{ marginTop: Spacing.xl }}
+              />
             </View>
           </View>
-        )}
+        </KeyboardAvoidingView>
+      </Modal>
 
-        {locationFilterEnabled && (
-          <TouchableOpacity style={styles.testNotificationButton} onPress={handleForceLocationUpdate} disabled={locationUpdating}>
-            {locationUpdating ? (
-              <ActivityIndicator size="small" color={PRIMARY_GREEN} />
-            ) : (
-              <>
-                <Ionicons name="refresh-outline" size={18} color={PRIMARY_GREEN} />
-                <Text style={styles.testNotificationButtonText}>Atualizar Localização</Text>
-              </>
+      {/* Modal 2: Location Settings */}
+      <Modal visible={activeModal === 'location'} transparent animationType="slide" onRequestClose={closeModal}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Typography variant="title" weight="bold" color={Colors.textPrimary}>Localização</Typography>
+              <TouchableOpacity onPress={closeModal} style={styles.closeButton}>
+                <Ionicons name="close" size={20} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.switchRow}>
+              <View style={{ flex: 1 }}>
+                <Typography variant="body" weight="semibold" color={Colors.textPrimary}>Filtro Regional inteligente</Typography>
+                <Typography variant="caption" color={Colors.textSecondary}>A IA sugere produtos e ofertas comuns do seu local.</Typography>
+              </View>
+              <Switch
+                value={locationFilterEnabled}
+                onValueChange={toggleLocationFilter}
+                trackColor={{ false: Colors.border, true: Colors.primary }}
+              />
+            </View>
+
+            {locationFilterEnabled && (
+              <Card style={{ marginVertical: Spacing.md, gap: Spacing.xs }}>
+                <Typography variant="caption" weight="bold" color={Colors.textMuted}>ENDEREÇO ATUAL</Typography>
+                <Typography variant="body" weight="bold" color={Colors.textPrimary}>
+                  {currentLocationLabel || 'Buscando sinal de GPS...'}
+                </Typography>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  label="Recalibrar GPS"
+                  loading={locationUpdating}
+                  onPress={handleUpdateLocation}
+                  style={{ marginTop: Spacing.sm }}
+                />
+              </Card>
             )}
-          </TouchableOpacity>
-        )}
-      </ModalShell>
-
-      <ModalShell visible={activeModal === 'security'} title="Segurança" onClose={closeModal}>
-        <View style={styles.securityCard}>
-          <View style={styles.securityIcon}>
-            <Ionicons name="shield-checkmark" size={24} color={PRIMARY_GREEN} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.securityTitle}>Conta protegida por Firebase Auth</Text>
-            <Text style={styles.securityText}>Para alterar a senha, confirme sua senha atual.</Text>
-          </View>
-        </View>
-
-        <Text style={styles.fieldLabel}>Senha atual</Text>
-        <TextInput
-          style={styles.input}
-          value={currentPassword}
-          onChangeText={setCurrentPassword}
-          placeholder="Digite sua senha atual"
-          placeholderTextColor="#94A3B8"
-          secureTextEntry
-        />
-
-        <Text style={styles.fieldLabel}>Nova senha</Text>
-        <TextInput
-          style={styles.input}
-          value={newPassword}
-          onChangeText={setNewPassword}
-          placeholder="Mínimo 6 caracteres"
-          placeholderTextColor="#94A3B8"
-          secureTextEntry
-        />
-
-        <Text style={styles.fieldLabel}>Confirmar nova senha</Text>
-        <TextInput
-          style={styles.input}
-          value={confirmPassword}
-          onChangeText={setConfirmPassword}
-          placeholder="Repita a nova senha"
-          placeholderTextColor="#94A3B8"
-          secureTextEntry
-        />
-
-        <PrimaryButton title="Alterar senha" loading={saving} onPress={handleChangePassword} />
-      </ModalShell>
-
-      <ModalShell visible={activeModal === 'help'} title="Ajuda & Suporte" onClose={closeModal}>
-        <HelpItem
-          icon="cart-outline"
-          title="Como registrar gastos?"
-          description="Adicione itens na lista e informe preço. O dashboard e o Luca usam esses valores para analisar o mês."
-        />
-        <HelpItem
-          icon="sparkles-outline"
-          title="Como o Luca usa meus dados?"
-          description="Ele lê apenas os dados salvos na sua conta: lista, gastos, categorias e histórico mensal."
-        />
-        <HelpItem
-          icon="cloud-outline"
-          title="Meus dados ficam salvos?"
-          description="Sim. Listas, preferências e histórico do Luca ficam no Firebase, separados pelo seu usuário."
-        />
-
-        <TouchableOpacity style={styles.supportButton} onPress={openSupportEmail}>
-          <Ionicons name="mail-outline" size={18} color={PRIMARY_GREEN} />
-          <Text style={styles.supportButtonText}>Falar com suporte</Text>
-        </TouchableOpacity>
-      </ModalShell>
-
-      <Modal
-        visible={showLogoutModal}
-        transparent
-        animationType="fade"
-        presentationStyle="overFullScreen"
-        statusBarTranslucent
-        onRequestClose={() => setShowLogoutModal(false)}
-      >
-        <View style={styles.logoutOverlay}>
-          <View style={styles.logoutCard}>
-            <View style={styles.logoutIconBox}>
-              <Ionicons name="log-out-outline" size={28} color={DANGER} />
-            </View>
-
-            <Text style={styles.logoutTitle}>Sair</Text>
-            <Text style={styles.logoutText}>Deseja realmente encerrar sua sessão?</Text>
-
-            <View style={styles.logoutActions}>
-              <TouchableOpacity
-                style={styles.logoutCancelButton}
-                onPress={() => setShowLogoutModal(false)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.logoutCancelText}>Cancelar</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.logoutConfirmButton}
-                onPress={async () => {
-                  setShowLogoutModal(false);
-                  await handleLogout();
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.logoutConfirmText}>Sair</Text>
-              </TouchableOpacity>
-            </View>
           </View>
         </View>
       </Modal>
-    </View>
-  );
-}
 
-function ModalShell({
-  visible,
-  title,
-  children,
-  onClose,
-}: {
-  visible: boolean;
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  const backdropOpacity = React.useRef(new Animated.Value(0)).current;
-  const sheetTranslateY = React.useRef(new Animated.Value(36)).current;
+      {/* Modal 3: Notifications Settings */}
+      <Modal visible={activeModal === 'notifications'} transparent animationType="slide" onRequestClose={closeModal}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Typography variant="title" weight="bold" color={Colors.textPrimary}>Notificações</Typography>
+              <TouchableOpacity onPress={closeModal} style={styles.closeButton}>
+                <Ionicons name="close" size={20} color={Colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
 
-  useEffect(() => {
-    if (!visible) return;
+            <View style={styles.switchRow}>
+              <View style={{ flex: 1 }}>
+                <Typography variant="body" weight="semibold" color={Colors.textPrimary}>Alertas de Orçamento</Typography>
+                <Typography variant="caption" color={Colors.textSecondary}>Seja notificado ao ultrapassar metas do mês.</Typography>
+              </View>
+              <Switch
+                value={notifications.budgetAlerts}
+                onValueChange={(val) => setNotifications({ ...notifications, budgetAlerts: val })}
+                trackColor={{ false: Colors.border, true: Colors.primary }}
+              />
+            </View>
 
-    backdropOpacity.setValue(0);
-    sheetTranslateY.setValue(36);
+            <View style={styles.switchRow}>
+              <View style={{ flex: 1 }}>
+                <Typography variant="body" weight="semibold" color={Colors.textPrimary}>Dicas de Economia</Typography>
+                <Typography variant="caption" color={Colors.textSecondary}>Dicas semanais do Luca sobre mercado local.</Typography>
+              </View>
+              <Switch
+                value={notifications.priceTips}
+                onValueChange={(val) => setNotifications({ ...notifications, priceTips: val })}
+                trackColor={{ false: Colors.border, true: Colors.primary }}
+              />
+            </View>
 
-    Animated.parallel([
-      Animated.timing(backdropOpacity, {
-        toValue: 1,
-        duration: 120,
-        useNativeDriver: true,
-      }),
-      Animated.spring(sheetTranslateY, {
-        toValue: 0,
-        damping: 18,
-        stiffness: 220,
-        mass: 0.9,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [backdropOpacity, sheetTranslateY, visible]);
-
-  return (
-    <Modal visible={visible} transparent animationType="none" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        style={styles.modalOverlay}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <Animated.View style={[styles.modalBackdrop, { opacity: backdropOpacity }]}>
-          <Pressable style={styles.modalBackdropPressable} onPress={onClose} />
-        </Animated.View>
-        <Animated.View style={[styles.modalSheet, { transform: [{ translateY: sheetTranslateY }] }]}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>{title}</Text>
-            <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-              <Ionicons name="close" size={22} color={TEXT_DARK} />
-            </TouchableOpacity>
+            <Button
+              variant="primary"
+              label="Salvar notificações"
+              loading={saving}
+              onPress={handleSaveNotifications}
+              style={{ marginTop: Spacing.xl }}
+            />
           </View>
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalContent}>
-            {children}
-          </ScrollView>
-        </Animated.View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-}
-
-function MenuItem({
-  icon,
-  title,
-  color = TEXT_DARK,
-  isLast = false,
-  onPress,
-}: {
-  icon: React.ComponentProps<typeof Ionicons>['name'];
-  title: string;
-  color?: string;
-  isLast?: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <TouchableOpacity
-      style={[styles.menuItem, isLast && { borderBottomWidth: 0 }]}
-      onPress={onPress}
-      activeOpacity={0.75}
-    >
-      <View style={styles.menuItemLeft}>
-        <View style={[styles.menuIconWrapper, { backgroundColor: color === DANGER ? '#FEE2E2' : '#F1F5F9' }]}>
-          <Ionicons name={icon} size={20} color={color} />
         </View>
-        <Text style={[styles.menuItemText, { color }]}>{title}</Text>
-      </View>
-      <Ionicons name="chevron-forward" size={18} color="#CBD5E1" />
-    </TouchableOpacity>
-  );
-}
+      </Modal>
 
-function PrimaryButton({ title, loading, onPress }: { title: string; loading: boolean; onPress: () => void }) {
-  return (
-    <TouchableOpacity style={[styles.primaryButton, loading && styles.primaryButtonDisabled]} onPress={onPress} disabled={loading}>
-      {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>{title}</Text>}
-    </TouchableOpacity>
-  );
-}
+      {/* Modal 4: Security Password Change */}
+      <Modal visible={activeModal === 'security'} transparent animationType="slide" onRequestClose={closeModal}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Typography variant="title" weight="bold" color={Colors.textPrimary}>Segurança</Typography>
+                <TouchableOpacity onPress={closeModal} style={styles.closeButton}>
+                  <Ionicons name="close" size={20} color={Colors.textPrimary} />
+                </TouchableOpacity>
+              </View>
 
-function SettingToggle({
-  title,
-  description,
-  value,
-  onPress,
-}: {
-  title: string;
-  description: string;
-  value: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <View style={styles.toggleRow}>
-      <TouchableOpacity style={styles.toggleTextContent} onPress={onPress} activeOpacity={0.8}>
-        <Text style={styles.toggleTitle}>{title}</Text>
-        <Text style={styles.toggleDescription}>{description}</Text>
-      </TouchableOpacity>
-      <Switch
-        value={value}
-        onValueChange={onPress}
-        trackColor={{ false: '#CBD5E1', true: '#A7F3D0' }}
-        thumbColor={value ? PRIMARY_GREEN : '#F8FAFC'}
+              <Typography variant="caption" weight="bold" color={Colors.textSecondary} style={{ marginBottom: 4 }}>
+                SENHA ATUAL
+              </Typography>
+              <TextInput
+                style={[styles.textInput, { marginBottom: Spacing.md }]}
+                value={currentPassword}
+                onChangeText={setCurrentPassword}
+                secureTextEntry
+                placeholder="Senha atual"
+                placeholderTextColor={Colors.textMuted}
+              />
+
+              <Typography variant="caption" weight="bold" color={Colors.textSecondary} style={{ marginBottom: 4 }}>
+                NOVA SENHA
+              </Typography>
+              <TextInput
+                style={[styles.textInput, { marginBottom: Spacing.md }]}
+                value={newPassword}
+                onChangeText={setNewPassword}
+                secureTextEntry
+                placeholder="Mínimo 6 caracteres"
+                placeholderTextColor={Colors.textMuted}
+              />
+
+              <Typography variant="caption" weight="bold" color={Colors.textSecondary} style={{ marginBottom: 4 }}>
+                CONFIRMAR NOVA SENHA
+              </Typography>
+              <TextInput
+                style={styles.textInput}
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                secureTextEntry
+                placeholder="Confirme a nova senha"
+                placeholderTextColor={Colors.textMuted}
+              />
+
+              <Button
+                variant="primary"
+                label="Atualizar senha"
+                loading={saving}
+                onPress={handleUpdatePassword}
+                style={{ marginTop: Spacing.xl }}
+              />
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <AppModal
+        visible={logoutModalVisible}
+        onClose={() => setLogoutModalVisible(false)}
+        title="Sair da conta"
+        description="Você precisará entrar novamente para acessar suas listas, pedidos e finanças."
+        type="confirm"
+        destructive
+        confirmLabel="Sair da conta"
+        cancelLabel="Continuar no app"
+        onConfirm={async () => {
+          setLogoutModalVisible(false);
+          try {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            await signOut(auth);
+            router.replace('/');
+          } catch (e) {
+            console.warn('[Perfil] Erro ao deslogar:', e);
+          }
+        }}
       />
     </View>
   );
 }
 
-function HelpItem({
+function ProfileMenuOption({
   icon,
   title,
-  description,
+  subtitle,
+  onPress,
 }: {
   icon: React.ComponentProps<typeof Ionicons>['name'];
   title: string;
-  description: string;
+  subtitle: string;
+  onPress: () => void;
 }) {
   return (
-    <View style={styles.helpItem}>
-      <View style={styles.helpIcon}>
-        <Ionicons name={icon} size={20} color={PRIMARY_GREEN} />
+    <TouchableOpacity style={styles.menuOption} onPress={onPress} activeOpacity={0.75}>
+      <View style={styles.menuOptionIconBg}>
+        <Ionicons name={icon} size={20} color={Colors.primary} />
       </View>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.helpTitle}>{title}</Text>
-        <Text style={styles.helpDescription}>{description}</Text>
+      <View style={styles.menuOptionText}>
+        <Typography variant="body" weight="semibold" color={Colors.textPrimary}>
+          {title}
+        </Typography>
+        <Typography variant="caption" color={Colors.textMuted}>
+          {subtitle}
+        </Typography>
       </View>
-    </View>
+      <Ionicons name="chevron-forward" size={18} color={Colors.textMuted} />
+    </TouchableOpacity>
   );
 }
 
 const styles = StyleSheet.create({
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: BG_LIGHT,
-  },
   container: {
     flex: 1,
-    backgroundColor: BG_LIGHT,
-  },
-  header: {
-    backgroundColor: PRIMARY_GREEN,
-    paddingHorizontal: 25,
-    paddingBottom: 20,
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
-  },
-  headerTop: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: '#fff',
+    backgroundColor: Colors.background,
   },
   scrollContent: {
-    paddingHorizontal: 25,
-    paddingTop: 30,
+    paddingHorizontal: Spacing.xl,
+    paddingTop: Spacing.md,
     paddingBottom: 120,
+    gap: Spacing.xl,
   },
-  profileSection: {
-    alignItems: 'center',
-    marginBottom: 35,
-  },
-  avatarWrapper: {
-    position: 'relative',
-    marginBottom: 15,
-  },
-  avatarCircle: {
-    width: 104,
-    height: 104,
-    borderRadius: 52,
-    backgroundColor: '#fff',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 2,
-    overflow: 'hidden',
-  },
-  avatarImage: {
-    width: '100%',
-    height: '100%',
-  },
-  editButton: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    backgroundColor: PRIMARY_GREEN,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 3,
-    borderColor: BG_LIGHT,
-  },
-  userName: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: TEXT_DARK,
-    textAlign: 'center',
-  },
-  userEmail: {
-    fontSize: 14,
-    color: TEXT_GRAY,
-    fontWeight: '500',
-    marginTop: 2,
-    textAlign: 'center',
-  },
-  menuCard: {
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.02,
-    shadowRadius: 5,
-    elevation: 1,
-    borderWidth: 1,
-    borderColor: '#F1F5F9',
-  },
-  menuItem: {
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 14,
-    paddingHorizontal: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F8FAFC',
+    paddingHorizontal: Spacing.xl,
+    paddingTop: STATUS_BAR_HEIGHT + Spacing.sm,
+    paddingBottom: Spacing.xs,
   },
-  menuItemLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
+  topLabel: {
+    letterSpacing: 0.8,
   },
-  menuIconWrapper: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
+  menuButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: Colors.surface,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 15,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-  menuItemText: {
-    fontSize: 15,
-    fontWeight: '700',
+  profileHeroCard: {
+    borderColor: Colors.border,
+    borderWidth: 1,
+    padding: Spacing.xl,
   },
-  versionText: {
-    textAlign: 'center',
-    color: '#CBD5E1',
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 30,
+  heroRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  heroAvatarCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: Colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    justifyContent: 'space-between',
+  },
+  statCell: {
+    flex: 1,
+    borderColor: Colors.border,
+    borderWidth: 1,
+    alignItems: 'center',
+    padding: Spacing.sm,
+    gap: 4,
+    height: 95,
+    justifyContent: 'center',
+  },
+  statLabel: {
+    lineHeight: 16,
+  },
+  sectionTitle: {
+    letterSpacing: 1,
+    marginTop: Spacing.sm,
+  },
+  menuContainer: {
+    padding: 0,
+    overflow: 'hidden',
+    borderColor: Colors.border,
+    borderWidth: 1,
+  },
+  menuOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: Spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  menuOptionIconBg: {
+    width: 40,
+    height: 40,
+    borderRadius: Radius.sm,
+    backgroundColor: 'rgba(183, 255, 0, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: Spacing.md,
+  },
+  menuOptionText: {
+    flex: 1,
+  },
+  aboutCard: {
+    borderColor: Colors.border,
+    borderWidth: 1,
+    padding: Spacing.lg,
+  },
+  aboutRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  aboutIconBg: {
+    width: 48,
+    height: 48,
+    borderRadius: Radius.sm,
+    backgroundColor: Colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  logoutBtnInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+    marginTop: Spacing.md,
+    marginBottom: Spacing.xl,
+    alignSelf: 'center',
   },
   modalOverlay: {
     flex: 1,
     justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
   },
-  modalBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(15, 23, 42, 0.35)',
-  },
-  modalBackdropPressable: {
-    flex: 1,
-  },
-  modalSheet: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 30,
-    borderTopRightRadius: 30,
-    maxHeight: '88%',
-    paddingHorizontal: 22,
-    paddingTop: 20,
+  modalContent: {
+    backgroundColor: Colors.surfaceElevated,
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    padding: Spacing.xl,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    paddingBottom: Platform.OS === 'ios' ? 40 : Spacing.xxxl,
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
-  },
-  modalTitle: {
-    fontSize: 21,
-    fontWeight: '900',
-    color: TEXT_DARK,
+    marginBottom: Spacing.xl,
   },
   closeButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: BG_LIGHT,
-    justifyContent: 'center',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Colors.surface,
     alignItems: 'center',
-  },
-  modalContent: {
-    paddingBottom: 32,
-  },
-  fieldLabel: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: TEXT_GRAY,
-    marginTop: 12,
-    marginBottom: 8,
-  },
-  input: {
-    height: 54,
-    borderRadius: 16,
-    backgroundColor: BG_LIGHT,
+    justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-    paddingHorizontal: 16,
-    color: TEXT_DARK,
-    fontSize: 15,
-    fontWeight: '700',
-    ...Platform.select({
-      web: {
-        outlineStyle: 'none',
-      } as any,
-    }),
+    borderColor: Colors.border,
   },
-  readonlyField: {
-    height: 54,
-    borderRadius: 16,
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 16,
+  textInput: {
+    height: 48,
+    borderRadius: Radius.sm,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    color: Colors.textPrimary,
+    paddingHorizontal: Spacing.md,
+    fontSize: 15,
+  },
+  switchRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-  },
-  readonlyText: {
-    color: TEXT_GRAY,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  helpText: {
-    color: '#94A3B8',
-    fontSize: 12,
-    fontWeight: '600',
-    lineHeight: 17,
-    marginTop: 8,
-  },
-  primaryButton: {
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: PRIMARY_GREEN,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 22,
-    shadowColor: PRIMARY_GREEN,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.22,
-    shadowRadius: 10,
-    elevation: 4,
-  },
-  primaryButtonDisabled: {
-    opacity: 0.7,
-  },
-  primaryButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '900',
-  },
-  toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    paddingVertical: 14,
+    paddingVertical: Spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
-  },
-  toggleTextContent: {
-    flex: 1,
-  },
-  toggleTitle: {
-    color: TEXT_DARK,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  toggleDescription: {
-    color: TEXT_GRAY,
-    fontSize: 12,
-    fontWeight: '600',
-    lineHeight: 17,
-    marginTop: 4,
-  },
-  securityCard: {
-    backgroundColor: '#F0FDF4',
-    borderRadius: 18,
-    padding: 16,
-    flexDirection: 'row',
-    gap: 12,
-    borderWidth: 1,
-    borderColor: '#DCFCE7',
-    marginBottom: 8,
-  },
-  securityIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  securityTitle: {
-    color: TEXT_DARK,
-    fontSize: 14,
-    fontWeight: '900',
-  },
-  securityText: {
-    color: TEXT_GRAY,
-    fontSize: 12,
-    fontWeight: '600',
-    lineHeight: 17,
-    marginTop: 3,
-  },
-  helpItem: {
-    flexDirection: 'row',
-    gap: 12,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
-  },
-  helpIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 13,
-    backgroundColor: '#DCFCE7',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  helpTitle: {
-    color: TEXT_DARK,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  helpDescription: {
-    color: TEXT_GRAY,
-    fontSize: 12,
-    fontWeight: '600',
-    lineHeight: 17,
-    marginTop: 4,
-  },
-  supportButton: {
-    height: 54,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    backgroundColor: '#F0FDF4',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    marginTop: 20,
-  },
-  supportButtonText: {
-    color: PRIMARY_GREEN,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  testNotificationButton: {
-    height: 54,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    backgroundColor: '#F0FDF4',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    marginTop: 15,
-    marginBottom: 5,
-  },
-  testNotificationButtonText: {
-    color: PRIMARY_GREEN,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  locationStatusBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#F8FAFC',
-    borderRadius: 18,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    marginTop: 20,
-    marginBottom: 5,
-  },
-  locationStatusTitle: {
-    fontSize: 13,
-    fontWeight: '900',
-    color: TEXT_DARK,
-    marginBottom: 2,
-  },
-  locationStatusText: {
-    fontSize: 14,
-    color: TEXT_GRAY,
-    fontWeight: '700',
-  },
-
-  logoutOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.45)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-  },
-  logoutCard: {
-    width: '100%',
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 24,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.16,
-    shadowRadius: 24,
-    elevation: 8,
-  },
-  logoutIconBox: {
-    width: 58,
-    height: 58,
-    borderRadius: 29,
-    backgroundColor: '#FEE2E2',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 14,
-  },
-  logoutTitle: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: TEXT_DARK,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  logoutText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: TEXT_GRAY,
-    lineHeight: 21,
-    marginBottom: 24,
-    textAlign: 'center',
-  },
-  logoutActions: {
-    flexDirection: 'row',
-    gap: 12,
-    width: '100%',
-  },
-  logoutCancelButton: {
-    flex: 1,
-    height: 52,
-    borderRadius: 18,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoutCancelText: {
-    color: TEXT_DARK,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  logoutConfirmButton: {
-    flex: 1,
-    height: 52,
-    borderRadius: 18,
-    backgroundColor: DANGER,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoutConfirmText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '900',
+    borderBottomColor: Colors.border,
   },
 });

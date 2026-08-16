@@ -1,23 +1,43 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Tabs, useFocusEffect } from 'expo-router';
+import { Tabs, useFocusEffect, useRouter } from 'expo-router';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Dimensions, Platform, StyleSheet, View } from 'react-native';
+import { Modal, Platform, Pressable, StyleSheet, View } from 'react-native';
+import Animated, { 
+  SlideInDown,
+  SlideOutDown
+} from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
+
 import { AppTour } from '../../components/AppTour';
 import { takeAppTourSession } from '../../context/tourSession';
 import { auth } from '../../scripts/firebaseConfig';
 import { completeAppTour, shouldShowAppTour } from '../../scripts/tourStorage';
-
-const PRIMARY_GREEN = '#00A36C';
-const TAB_BG = '#0F172A';
-
-const { width } = Dimensions.get('window');
-const isSmallScreen = width < 375;
+import { Colors, Spacing, Radius } from '../../constants/theme';
+import { QUICK_ACTIONS } from '../../domain/navigation';
+import { BottomNav } from '../../components/ui/BottomNav';
+import { SidebarContext, Sidebar } from '../../components/ui/Sidebar';
+import { Typography } from '../../components/ui/Typography';
 
 export default function TabLayout() {
+  const [sidebarVisible, setSidebarVisible] = useState(false);
+
+  return (
+    <SidebarContext.Provider value={{ visible: sidebarVisible, setVisible: setSidebarVisible }}>
+      <TabLayoutContent />
+      <Sidebar visible={sidebarVisible} onClose={() => setSidebarVisible(false)} />
+    </SidebarContext.Provider>
+  );
+}
+
+function TabLayoutContent() {
+  const router = useRouter();
   const [tourVisible, setTourVisible] = useState(false);
   const [tourUid, setTourUid] = useState<string | null>(null);
   const tourCheckedRef = useRef(false);
+  
+  // Action Hub State
+  const [actionHubVisible, setActionHubVisible] = useState(false);
 
   const openTourIfNeeded = useCallback(async (user: User) => {
     if (tourVisible) return;
@@ -55,6 +75,15 @@ export default function TabLayout() {
     return unsub;
   }, [openTourIfNeeded]);
 
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !actionHubVisible) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActionHubVisible(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [actionHubVisible]);
+
   useFocusEffect(
     useCallback(() => {
       const user = auth.currentUser;
@@ -75,135 +104,166 @@ export default function TabLayout() {
     }
   }, [tourUid]);
 
+  const toggleActionHub = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setActionHubVisible(!actionHubVisible);
+  };
+
+  const handleAction = (route: string) => {
+    setActionHubVisible(false);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    router.push(route as any);
+  };
+
   return (
     <>
-    <Tabs
-      screenOptions={{
-        tabBarActiveTintColor: PRIMARY_GREEN,
-        tabBarInactiveTintColor: '#64748B',
-        headerShown: false,
-        tabBarShowLabel: true,
-        tabBarLabelStyle: {
-          fontSize: isSmallScreen ? 10 : 11,
-          fontWeight: '700',
-          marginBottom: Platform.OS === 'ios' ? 0 : 8,
-        },
-        tabBarStyle: {
-          position: 'absolute',
-          bottom: Platform.OS === 'ios' ? 25 : 12,
-          marginHorizontal: isSmallScreen ? 20 : 30, // substitui left e right
-          height: Platform.OS === 'ios' ? 75 : 68,
-          backgroundColor: TAB_BG,
-          borderRadius: 40,
-          borderTopWidth: 0,
-          paddingTop: isSmallScreen ? 8 : 12,
-          paddingHorizontal: 8,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 10 },
-          shadowOpacity: 0.4,
-          shadowRadius: 20,
-          elevation: 10,
-        },
-      }}
-    >
-      <Tabs.Screen
-        name="home"
-        options={{
-          tabBarLabel: 'Início',
-          tabBarIcon: ({ color, focused }) => (
-            <View style={[styles.iconWrapper, focused && styles.activeIconBg]}>
-              <Ionicons
-                name={focused ? 'home' : 'home-outline'}
-                size={isSmallScreen ? 20 : 22}
-                color={color}
-              />
+      <Tabs
+        tabBar={(props) => <BottomNav {...props} onOpenActions={toggleActionHub} />}
+        screenOptions={{
+          headerShown: false,
+        }}
+      >
+        <Tabs.Screen
+          name="home"
+          options={{ title: 'Início' }}
+        />
+        
+        <Tabs.Screen
+          name="stats"
+          options={{ title: 'Gastos' }}
+        />
+
+        <Tabs.Screen
+          name="plus"
+          options={{ title: 'Ações' }}
+          listeners={{
+            tabPress: (e) => {
+              e.preventDefault();
+              toggleActionHub();
+            }
+          }}
+        />
+
+        <Tabs.Screen
+          name="lists"
+          options={{ title: 'Lista' }}
+        />
+
+        <Tabs.Screen
+          name="profile"
+          options={{ title: 'Perfil' }}
+        />
+
+
+      </Tabs>
+
+      <AppTour visible={tourVisible} onFinish={handleTourFinish} />
+
+      {/* Action Hub Overlay */}
+      <Modal
+        visible={actionHubVisible}
+        transparent
+        animationType="none"
+        onRequestClose={toggleActionHub}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable style={styles.backdrop} onPress={toggleActionHub} />
+          
+          <Animated.View 
+            entering={SlideInDown.duration(250)}
+            exiting={SlideOutDown.duration(200)}
+            style={styles.actionPanel}
+          >
+            <Typography variant="title" weight="bold" color={Colors.textPrimary} style={styles.panelTitle}>
+              Ações Rápidas
+            </Typography>
+
+            <View style={styles.actionsContainer}>
+              {QUICK_ACTIONS.map((action) => (
+                <Pressable
+                  key={action.route}
+                  accessibilityRole="button"
+                  style={styles.actionRow}
+                  onPress={() => handleAction(action.route)}
+                >
+                  <View style={styles.actionIconContainer}>
+                    <Ionicons
+                      name={action.icon as keyof typeof Ionicons.glyphMap}
+                      size={22}
+                      color={Colors.primary}
+                    />
+                  </View>
+                  <Typography variant="body" weight="semibold" color={Colors.textPrimary}>
+                    {action.label}
+                  </Typography>
+                </Pressable>
+              ))}
             </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="lists"
-        options={{
-          tabBarLabel: 'Lista',
-          tabBarIcon: ({ color, focused }) => (
-            <View style={[styles.iconWrapper, focused && styles.activeIconBg]}>
-              <Ionicons
-                name={focused ? 'cart' : 'cart-outline'}
-                size={isSmallScreen ? 21 : 24}
-                color={color}
-              />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="stats"
-        options={{
-          tabBarLabel: 'Finanças',
-          tabBarIcon: ({ color, focused }) => (
-            <View style={[styles.iconWrapper, focused && styles.activeIconBg]}>
-              <Ionicons
-                name={focused ? 'bar-chart' : 'bar-chart-outline'}
-                size={isSmallScreen ? 20 : 22}
-                color={color}
-              />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="luca-tab"
-        options={{
-          tabBarLabel: 'Luca',
-          tabBarIcon: ({ color, focused }) => (
-            <View style={[styles.iconWrapper, focused && styles.activeIconBg]}>
-              <Ionicons
-                name={focused ? 'sparkles' : 'sparkles-outline'}
-                size={isSmallScreen ? 20 : 22}
-                color={color}
-              />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="profile"
-        options={{
-          tabBarLabel: 'Perfil',
-          tabBarIcon: ({ color, focused }) => (
-            <View style={[styles.iconWrapper, focused && styles.activeIconBg]}>
-              <Ionicons
-                name={focused ? 'person' : 'person-outline'}
-                size={isSmallScreen ? 20 : 22}
-                color={color}
-              />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="explore"
-        options={{
-          href: null,
-        }}
-      />
-    </Tabs>
-    <AppTour visible={tourVisible} onFinish={handleTourFinish} />
+
+            <Pressable style={styles.closeButton} onPress={toggleActionHub}>
+              <Ionicons name="close" size={24} color={Colors.textPrimary} />
+            </Pressable>
+          </Animated.View>
+        </View>
+      </Modal>
     </>
   );
 }
 
 const styles = StyleSheet.create({
-  iconWrapper: {
-    width: isSmallScreen ? 36 : 42,
-    height: isSmallScreen ? 36 : 42,
-    borderRadius: isSmallScreen ? 18 : 21,
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  actionPanel: {
+    backgroundColor: Colors.surfaceElevated,
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    padding: Spacing.xxl,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    alignItems: 'center',
+    paddingBottom: Platform.OS === 'ios' ? 40 : Spacing.xxxl,
+  },
+  panelTitle: {
+    marginBottom: Spacing.xl,
+  },
+  actionsContainer: {
+    width: '100%',
+    gap: Spacing.md,
+    marginBottom: Spacing.xl,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    padding: Spacing.lg,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    gap: Spacing.md,
+  },
+  actionIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: Radius.sm,
+    backgroundColor: 'rgba(183, 255, 0, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 2,
   },
-  activeIconBg: {
-    backgroundColor: 'rgba(0, 163, 108, 0.15)',
+  closeButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: Spacing.sm,
   },
-
 });

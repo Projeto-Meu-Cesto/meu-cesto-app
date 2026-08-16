@@ -17,7 +17,7 @@ export type TourStep = {
   title: string;
   description: string;
   icon: React.ComponentProps<typeof Ionicons>['name'];
-  tabHref?: '/(tabs)/home' | '/(tabs)/lists' | '/(tabs)/stats' | '/(tabs)/luca-tab' | '/(tabs)/profile';
+  tabHref?: '/(tabs)/home' | '/(tabs)/lists' | '/(tabs)/stats' | '/luca' | '/(tabs)/profile';
   tabLabel?: string;
 };
 
@@ -63,7 +63,7 @@ export const APP_TOUR_STEPS: TourStep[] = [
     description:
       'Converse com o Luca para analisar gastos, planejar o mercado e receber dicas personalizadas.',
     icon: 'sparkles',
-    tabHref: '/(tabs)/luca-tab',
+    tabHref: '/luca',
     tabLabel: 'Luca',
   },
   {
